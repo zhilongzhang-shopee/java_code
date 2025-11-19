@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSE Flux 测试页面</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            width: 100%;
+            max-width: 1200px;
+            padding: 30px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        
+        button {
+            padding: 12px 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #999;
+            transition: background 0.3s;
+        }
+        
+        .status-indicator.connected {
+            background: #10b981;
+            box-shadow: 0 0 10px #10b981;
+        }
+        
+        .status-indicator.connecting {
+            background: #f59e0b;
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        .panel {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        
+        .panel-header {
+            background: #f5f5f5;
+            padding: 15px;
+            font-weight: 600;
+            color: #333;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .panel-body {
+            padding: 15px;
+            height: 400px;
+            overflow-y: auto;
+            background: #fafafa;
+        }
+        
+        .event-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background: white;
+            border-left: 4px solid #667eea;
+            border-radius: 3px;
+            font-size: 13px;
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        .event-item.data {
+            border-left-color: #10b981;
+        }
+        
+        .event-item.error {
+            border-left-color: #ef4444;
+            background: #fef2f2;
+        }
+        
+        .event-item.success {
+            border-left-color: #10b981;
+            background: #f0fdf4;
+        }
+        
+        .event-number {
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+        
+        .event-detail {
+            color: #666;
+            font-family: 'Monaco', 'Courier New', monospace;
+        }
+        
+        .event-label {
+            display: inline-block;
+            padding: 2px 8px;
+            background: #667eea;
+            color: white;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-right: 5px;
+        }
+        
+        .event-status {
+            display: inline-block;
+            padding: 2px 8px;
+            background: #10b981;
+            color: white;
+            border-radius: 3px;
+            font-size: 11px;
+            margin-right: 5px;
+        }
+        
+        .event-time {
+            color: #999;
+            font-size: 11px;
+        }
+        
+        .no-data {
+            color: #999;
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: 600;
+            color: #667eea;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        @media (max-width: 768px) {
+            .content {
+                grid-template-columns: 1fr;
+            }
+            
+            .controls {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 SSE Flux 实时数据推送演示</h1>
+        <p class="subtitle">仿照 CommonChatOpenApiController 的设计，使用 Flux 定时推送数据通过 SSE 到前端</p>
+        
+        <div class="status">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span id="statusText">未连接</span>
+        </div>
+        
+        <div style="background: #f0f0f0; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+            <label style="font-weight: 600; margin-right: 10px;">🔌 服务器地址:</label>
+            <input type="text" id="apiBaseUrl" value="http://localhost:8080" 
+                   style="padding: 8px; width: 300px; border: 1px solid #ddd; border-radius: 3px;">
+            <button onclick="updateApiUrl()" style="margin-left: 10px; padding: 8px 15px; background: #667eea; color: white; border: none; border-radius: 3px; cursor: pointer;">✓ 更新</button>
+            <span id="urlStatus" style="margin-left: 10px; color: green;"></span>
+        </div>
+        
+        <div class="controls">
+            <button onclick="connectSimple()">📊 简单数据流 (10个数字)</button>
+            <button onclick="connectMultiStage()">🔄 多阶段处理 (3个阶段)</button>
+            <button onclick="connectHeartbeat()">💓 心跳检测 (10个心跳)</button>
+            <button onclick="clearData()">🗑️ 清空数据</button>
+        </div>
+        
+        <div class="content">
+            <div class="panel">
+                <div class="panel-header">📥 原始接收数据</div>
+                <div class="panel-body" id="rawPanel">
+                    <div class="no-data">点击按钮开始接收数据</div>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <div class="panel-header">📊 数据分析面板</div>
+                <div class="panel-body" id="analysisPanel">
+                    <div class="no-data">等待数据接收...</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-value" id="totalCount">0</div>
+                <div class="stat-label">接收消息总数</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="processCount">0</div>
+                <div class="stat-label">处理消息数</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="errorCount">0</div>
+                <div class="stat-label">错误消息数</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ⚙️ 配置：更改此处以连接到不同的服务器
+        const API_BASE_URL = 'http://localhost:8080';
+        
+        let eventSource = null;
+        let stats = {
+            total: 0,
+            success: 0,
+            error: 0
+        };
+        
+        /**
+         * 连接简单数据流
+         * 请求：GET /api/sse/simple
+         * 响应：10个简单数字，每个间隔500ms
+         */
+        function connectSimple() {
+            connect(API_BASE_URL + '/api/sse/simple', '简单数据流');
+        }
+        
+        /**
+         * 连接多阶段处理流
+         * 请求：GET /api/sse/multi-stage
+         * 响应：分三个阶段发送数据
+         */
+        function connectMultiStage() {
+            connect(API_BASE_URL + '/api/sse/multi-stage', '多阶段处理流');
+        }
+        
+        /**
+         * 连接心跳检测流
+         * 请求：GET /api/sse/heartbeat
+         * 响应：每秒发送一个心跳
+         */
+        function connectHeartbeat() {
+            connect(API_BASE_URL + '/api/sse/heartbeat', '心跳检测流');
+        }
+        
+        /**
+         * 更新API基础URL
+         */
+        function updateApiUrl() {
+            const newUrl = document.getElementById('apiBaseUrl').value.trim();
+            const statusSpan = document.getElementById('urlStatus');
+            
+            if (!newUrl) {
+                statusSpan.textContent = '❌ 地址不能为空';
+                statusSpan.style.color = 'red';
+                return;
+            }
+            
+            // 验证URL格式
+            try {
+                new URL(newUrl);
+                window.API_BASE_URL = newUrl;
+                statusSpan.textContent = `✓ 已更新为: ${newUrl}`;
+                statusSpan.style.color = 'green';
+                console.log('API基础URL已更新:', newUrl);
+            } catch (e) {
+                statusSpan.textContent = '❌ URL格式不正确';
+                statusSpan.style.color = 'red';
+            }
+        }
+        
+        /**
+         * 通用连接函数
+         * @param {string} url 后端API地址
+         * @param {string} title 流标题
+         */
+        function connect(url, title) {
+            // 防止重复点击导致多个连接
+            if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
+                console.warn('⚠️ 已有连接未关闭，请先清空数据');
+                addAnalysisMessage('⚠️ 已有连接未关闭，请先点击 🗑️ 清空数据');
+                return;
+            }
+            
+            clearData();
+            
+            // 关闭已有连接
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            
+            // 更新状态
+            updateStatus('connecting', `连接中: ${title}`);
+            
+            try {
+                // 创建EventSource连接
+                // 后端返回SseEmitter，前端通过EventSource接收数据
+                eventSource = new EventSource(url);
+                
+                // 监听所有事件
+                eventSource.addEventListener('simpleFluxEvent', handleEvent);
+                eventSource.addEventListener('multiStageEvent', handleEvent);
+                eventSource.addEventListener('heartbeat', handleEvent);
+                
+                // 默认消息处理
+                eventSource.onmessage = handleEvent;
+                
+                // 连接打开
+                eventSource.onopen = function() {
+                    updateStatus('connected', `✅ 已连接: ${title}`);
+                    console.log('EventSource已连接');
+                };
+                
+                // 错误处理
+                eventSource.onerror = function(error) {
+                    console.error('EventSource错误:', error);
+                    stats.error++;
+                    
+                    if (eventSource.readyState === EventSource.CLOSED) {
+                        updateStatus('disconnected', '❌ 连接已关闭');
+                        addAnalysisMessage(`连接关闭，共接收 ${stats.total} 条消息`);
+                    } else {
+                        updateStatus('error', '⚠️ 连接错误');
+                    }
+                    
+                    updateStats();
+                };
+                
+            } catch (error) {
+                console.error('连接失败:', error);
+                updateStatus('error', `❌ 连接失败: ${error.message}`);
+            }
+        }
+        
+        /**
+         * 处理SSE事件
+         * @param {Event} event SSE事件对象
+         */
+        function handleEvent(event) {
+            stats.total++;
+            
+            try {
+                let data;
+                
+                const isHeartbeat = (event.type === 'heartbeat')
+                    || (event.type === 'message' && typeof event.data === 'string' && event.data.includes('心跳'));
+
+                // 心跳消息格式：纯文本
+                if (isHeartbeat) {
+                    data = {
+                        dataNumber: event.data.split('#')[1],
+                        label: 'HEARTBEAT',
+                        message: event.data,
+                        timestamp: Date.now()
+                    };
+                } else {
+                    // 其他消息格式：JSON
+                    data = JSON.parse(event.data);
+                }
+                
+                // 添加到UI
+                addRawData(data);
+                addAnalysisData(data);
+                stats.success++;
+
+                // 如果状态为 completed，主动关闭连接，防止自动重连
+                if (data.status && data.status.toLowerCase() === 'completed') {
+                    addAnalysisMessage('✅ 数据流完成，主动关闭连接');
+                    updateStatus('disconnected', '✅ 流已完成');
+                    if (eventSource) {
+                        eventSource.close();
+                        eventSource = null;
+                    }
+                }
+                
+            } catch (error) {
+                console.error('处理事件失败:', error, event.data);
+                addErrorMessage(`JSON解析失败: ${error.message}`);
+                stats.error++;
+            }
+            
+            updateStats();
+        }
+        
+        /**
+         * 添加原始数据到面板
+         * @param {Object} data 数据对象
+         */
+        function addRawData(data) {
+            const panel = document.getElementById('rawPanel');
+            
+            if (panel.querySelector('.no-data')) {
+                panel.innerHTML = '';
+            }
+            
+            const item = document.createElement('div');
+            item.className = 'event-item data';
+            
+            const time = new Date(data.timestamp).toLocaleTimeString('zh-CN');
+            
+            item.innerHTML = `
+                <div class="event-number">📦 #${data.dataNumber}</div>
+                <div class="event-detail">
+                    <span class="event-label">${data.label || 'DATA'}</span>
+                    <span class="event-status">${data.status || '待处理'}</span>
+                    <span class="event-time">${time}</span>
+                </div>
+                <div class="event-detail" style="margin-top: 5px;">
+                    ${data.message || '无消息'}
+                </div>
+            `;
+            
+            panel.insertBefore(item, panel.firstChild);
+            
+            // 限制显示条数
+            while (panel.children.length > 50) {
+                panel.removeChild(panel.lastChild);
+            }
+        }
+        
+        /**
+         * 添加分析数据到面板
+         * @param {Object} data 数据对象
+         */
+        function addAnalysisData(data) {
+            const panel = document.getElementById('analysisPanel');
+            
+            if (panel.querySelector('.no-data')) {
+                panel.innerHTML = '';
+            }
+            
+            const item = document.createElement('div');
+            item.className = 'event-item success';
+            
+            const analysis = `
+                ✅ 数字: ${data.dataNumber} | 
+                📌 标签: ${data.label} | 
+                ⚙️ 状态: ${data.status}
+            `;
+            
+            item.textContent = analysis;
+            panel.insertBefore(item, panel.firstChild);
+            
+            while (panel.children.length > 30) {
+                panel.removeChild(panel.lastChild);
+            }
+        }
+        
+        /**
+         * 添加错误消息
+         * @param {string} message 错误消息
+         */
+        function addErrorMessage(message) {
+            const panel = document.getElementById('analysisPanel');
+            
+            if (panel.querySelector('.no-data')) {
+                panel.innerHTML = '';
+            }
+            
+            const item = document.createElement('div');
+            item.className = 'event-item error';
+            item.textContent = '❌ ' + message;
+            
+            panel.insertBefore(item, panel.firstChild);
+        }
+        
+        /**
+         * 添加分析消息
+         * @param {string} message 消息内容
+         */
+        function addAnalysisMessage(message) {
+            const panel = document.getElementById('analysisPanel');
+            
+            const item = document.createElement('div');
+            item.className = 'event-item';
+            item.textContent = 'ℹ️ ' + message;
+            item.style.borderLeftColor = '#3b82f6';
+            
+            panel.insertBefore(item, panel.firstChild);
+        }
+        
+        /**
+         * 清空所有数据
+         */
+        function clearData() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            
+            stats = { total: 0, success: 0, error: 0 };
+            
+            document.getElementById('rawPanel').innerHTML = '<div class="no-data">点击按钮开始接收数据</div>';
+            document.getElementById('analysisPanel').innerHTML = '<div class="no-data">等待数据接收...</div>';
+            
+            updateStats();
+            updateStatus('disconnected', '未连接');
+        }
+        
+        /**
+         * 更新状态指示器
+         * @param {string} state 状态
+         * @param {string} text 状态文本
+         */
+        function updateStatus(state, text) {
+            const indicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('statusText');
+            
+            indicator.className = 'status-indicator';
+            if (state === 'connected') {
+                indicator.classList.add('connected');
+            } else if (state === 'connecting') {
+                indicator.classList.add('connecting');
+            }
+            
+            statusText.textContent = text;
+        }
+        
+        /**
+         * 更新统计信息
+         */
+        function updateStats() {
+            document.getElementById('totalCount').textContent = stats.total;
+            document.getElementById('processCount').textContent = stats.success;
+            document.getElementById('errorCount').textContent = stats.error;
+        }
+        
+        // 页面卸载时关闭连接
+        window.addEventListener('beforeunload', () => {
+            if (eventSource) {
+                eventSource.close();
+            }
+        });
+    </script>
+</body>
+</html>
+
