@@ -1,0 +1,1897 @@
+Order Mart v3 User guide
+
+Raise new request: [datasuite ticket center](https://www.google.com/url?q=https://datasuite.shopee.io/ticket/center/create/DATA_MART_REQUIREMENT&sa=D&source=editors&ust=1757790484225396&usg=AOvVaw3s6u0DSgfhY7rJ37im4t4U)
+
+Seatalk Support Group: [join group](https://www.google.com/url?q=https://space.shopee.io/api/utility/seatalk/group/invite/723743751698637538&sa=D&source=editors&ust=1757790484225645&usg=AOvVaw28k2ZuBrfj2i6VfRoAYzmT)
+
+|                                                              |
+| ------------------------------------------------------------ |
+| Note:  Please read the[Important things to take note](#h.o01p6okea353) section before using the mart tables    For a detailed description of the tables and their Data Map link, please refer to the [Order Mart Tables](#h.irdhfxslbnnd) section below. |
+
+# Introduction
+
+The intent of the order mart is to allow users to extract and analyze data relevant to order events within the Shopee platform across all regions. The order mart will cover both orders within Marketplace (MP) only.
+
+Order flow contain 4 key stages
+
+* Checkout (Order Placement)
+* Order Fulfillment
+* Return and Refund (can happen before or after escrow process)
+* Escrow
+
+The current order mart only covers analysis topics around checkout, and will expand to the rest of the stages in the upcoming releases.
+
+The user guide will provide an overview of:
+
+* Analysis topics that can be derived from order mart
+* Order mart table and column definitions
+* The current order process to provide a relationship between business and data
+* Sample queries
+
+## Order Mart Team
+
+|              |               |                         |
+| ------------ | ------------- | ----------------------- |
+| Name         | Role          | Email                   |
+| Aoyang Dai   | Data PM Lead  | aoyang.dai@shopee.com   |
+| Peng Yi      | Order Mart PM | peng.yi@shopee.com      |
+| Dennis       | Order Mart PM | dennis.limzy@shopee.com |
+| Xia Linsheng | Data Engineer | linsheng.xia@shopee.com |
+| Zeng Xuhui   | Data Engineer | xuhui.zengxh@shopee.com |
+| Kevin Liu    | Data Engineer | kevin.liu@shopee.com    |
+
+## Important things to take note
+
+### Query performance and general information
+
+#### Using of DWS tables for reports
+
+DWS (Data Warehouse Summary) tables are aggregated tables of DWD (Data Warehouse Detail) tables. As much as possible, your reports and dashboards should be using DWS tables, this will lead to improvement in query performance and computational resources needed and solve metrics inconsistency issues across reports.
+
+#### Using of partition keys for reports
+
+All the tables are partitioned by grass\_date, grass\_region, tz\_type for order mart. When building a report or dashboard, please ensure that at least one of the partition keys is used as a filter in the query. This is to reduce the size of query scan required.
+
+#### Timezone issues
+
+Below are the date columns available in the data mart and their respective time zone.
+
+|               |           |                                                              |
+| ------------- | --------- | ------------------------------------------------------------ |
+| Column name   | Data type | Time zone                                                    |
+| grass\_date   | date      | * For DWD and DIM tables, time zone is local * For DWS tables, refer to tz\_type  * If tz\_type = ‘local’, time zone is local * If tz\_type = ‘regional’, time zone is SGT time     Note: as DWS table might contain metrics for both timezone, please ensure that tz\_type is always included in the filter to avoid double count |
+| xx\_timestamp | integer   | Unix time in UTC                                             |
+| xx\_datetime  | string    | Date time in string in tz\_type timezone                     |
+
+|                                                       |          |
+| ----------------------------------------------------- | -------- |
+| Country                                               | Timezone |
+| Thailand, Vietnam and Indonesia                       | GMT +7   |
+| Regional, Taiwan, Singapore, Philippines and Malaysia | GMT +8   |
+| Brazil, Chile                                         | GMT -3   |
+| Mexico                                                | GMT -6   |
+| Colombia                                              | GMT -5   |
+
+### 2nd Schedule Run for LATAM T-1 Full Data
+
+To support the requirement of generating T-1 data for LATAM local teams, Order Mart will have a 2nd scheduled run on a daily basis for LATAM regions’ data respectively so that local teams will be able to retrieve the full T-1 data at 9AM local time.
+
+|                 |                                                              |
+| --------------- | ------------------------------------------------------------ |
+| Impact          | You may encounter some errors when querying from regional tables before 8PM.   In particularly, tz\_type='local' and grass\_region in ('BR','CO', 'CL', 'MX') and grass\_date in (current\_date - interval ‘1’ day,  date '9999-01-01')    \* T-1 grass\_date is empty;  \* 9999-01-01 only contains regional timezone T-1 data. |
+| Action Required | If you encounter those error messages please be patient and wait for around 10 mins before retrying.    You may also want to set dependencies based on table markers. For more information about this please refer to this [section](https://www.google.com/url?q=https://docs.google.com/document/d/1XQ-wX-pwyg4T9EGHZbuc-VSAXwP5SJkN-nch23MTqIs/edit%23heading%3Dh.aqg903uii11q&sa=D&source=editors&ust=1757790484241257&usg=AOvVaw2d4y_h5Rpqe48j1O7o8yro). |
+
+### Table specific information
+
+#### xx\_di vs xx\_df tables in DWD
+
+xx\_di tables are fact tables that record multiple events that occurred in an order lifecycle, for example when an order is placed, paid and completed. This means that within the table, an order can be recorded up to 3 times. There are 2 things to take note when using xx\_di tables.
+
+* You need to filter the data with is\_placed, is\_paid, is\_completed tag field using the data, if not you will double count certain metrics
+* The grass\_date is storing the event date rather than the order create date (meaning for an is\_paid event of the order, its the date the order is paid)
+
+xx\_df tables are profile tables of the order that provide the latest information of all the orders. The order will be updated until they have reached their terminal stage.  There are 2 things to take note when using xx\_df tables.
+
+* The grass\_date is storing the date when the order reached terminal status (Note: there is an update in definition for terminal status, please refer to [Terminal Status](#h.ndelfjmsmwqy) section for more details) , for orders that do not reach terminal status, it will be stored in date ‘9999-01-01’ partition.
+* Order that reached terminal status will not be updated anymore.
+
+#### Current Limitations of tables and things to take noted
+
+xx\_di table
+
+|                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Limitations / take note                                      | Impact                                                       |
+| Gmv of an order might still change after an order is placed when the user changes payment method (leading to change in buyer\_txn\_fee). | Sum of gmv for is\_placed event might have slight different from df table based on create time |
+
+xx\_df table
+
+|                                                              |                                           |
+| ------------------------------------------------------------ | ----------------------------------------- |
+| Limitations / take note                                      | Impact                                    |
+| There are a few terminal orders that will be stuck in the date(‘9999-01-01’) partition due to bugs with the order audit table. (event after their status is at terminals status) | We have raised a ticket to fix the issue. |
+| Some fields might still be updated after order reached terminal status | * ASF * order\_item\_status               |
+
+---
+
+# Quick Start Guide
+
+The quick start guide will contain a few basic queries that users can do to get themselves familiarized with the order mart tables.
+
+1. Total GMV of orders placed on 22nd August 2020 in Indonesia
+
+SELECT SUM(gmv)
+
+FROM   mp\_order.dwd\_order\_place\_pay\_complete\_di\_\_reg\_s0\_live
+
+WHERE  is\_placed = 1 -- filter for orders that are placed today
+
+       AND grass\_date = DATE'2020-08-22'
+    
+       AND grass\_region = 'ID'
+    
+       AND is\_bi\_excluded = 0
+
+2. Identify the list of non-cod orders that are currently unpaid that are created 2 days ago
+
+SELECT order\_id,
+
+       order\_be\_status
+
+FROM   mp\_order.dwd\_order\_all\_ent\_df\_\_reg\_s0\_live
+
+WHERE  grass\_date = date'9999-01-01' -- filter for orders that are not terminated (not escrow\_paid, cancel\_complete or invalid)
+
+AND    grass\_region = 'ID'
+
+AND    order\_be\_status = 'UNPAID'
+
+AND    is\_cod\_order = 0
+
+AND    split(create\_datetime,' ')[1] = cast(CURRENT\_DATE - interval '2' day AS varchar) -- filter for orders that are created 2 days ago
+
+limit 100
+
+3. Total order count that are paid on 22nd August 2020 for each payment channel
+
+SELECT payment\_be\_channel,
+
+       Count(\*)
+
+FROM   mp\_order.dwd\_order\_place\_pay\_complete\_di\_\_reg\_s0\_live
+
+WHERE  is\_paid = 1 -- filters orders that are paid on 22nd august
+
+       AND grass\_date = DATE'2020-08-22'
+    
+       AND grass\_region = 'ID'
+
+GROUP  BY 1
+
+4. Find the gmv and nmv of orders created on 22nd August 2020 for Indonesia
+
+SELECT Sum(gmv) as gmv,
+
+       Sum(nmv) as nmv
+
+FROM   mp\_order.dwd\_order\_all\_ent\_df\_\_reg\_s0\_live
+
+WHERE  grass\_region = 'ID'
+
+AND    grass\_date >= date'2020-08-22' -- filters to reduce data scan size
+
+AND    split(create\_datetime,' ')[1] = '2020-08-22' -- filters orders that are created on 22nd August
+
+5. Get the total units sold and gmv of an item with item\_id = 6727574351 on 22nd August 2020
+
+SELECT gmv\_1d,
+
+       item\_amount\_1d
+
+FROM   mp\_order.dws\_item\_gmv\_1d\_\_reg\_s0\_live
+
+WHERE  grass\_date = DATE'2020-08-22'
+
+       AND grass\_region = 'ID'
+    
+       AND item\_id = 6727574351
+
+---
+
+# Business Analysis Topics
+
+The section below allows the user to understand what is the high level analysis that can be done using Order Mart tables.
+
+|                                         |                                                              |                                                              |                                                         |
+| --------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------- |
+| Business Line                           | Analytics Category                                           | Analytics Topics                                             | Metrics                                                 |
+| Marketplace                             | General Reporting                                            | Platform overall sales volume analysis                       | * total number of orders * total gross/net mv of orders |
+| Promotion channel sales volume analysis | * total number of orders * total gross/net mv of orders      |                                                              |                                                         |
+| CB sales volume analysis                | * total number of orders * total gross/net mv of orders      |                                                              |                                                         |
+| SBS sales volume analysis               | * total number of orders * total gross/net mv of orders * COGS |                                                              |                                                         |
+| Revenue analysis                        | * Marketplace Revenue  * commission fees * handling/transaction fees |                                                              |                                                         |
+| Operating costs analysis                | * marketing costs * logistics costs                          |                                                              |                                                         |
+| Operations - Logistics                  | Logistics channel usage analysis                             | * total number of sellers * total number of orders           |                                                         |
+| Operation - Payments                    | Payment channel usage analysis                               | * total number of gross / net orders * total number of buyers (new vs normal) * total gross / net mv |                                                         |
+| COD channel analysis by location        | * total orders * average basket size * failed delivery rate * total buyers * total items activated |                                                              |                                                         |
+| COD reconciliation report               | * raw order profile information                              |                                                              |                                                         |
+| Credit card channel usage analysis      | * total orders and gmv                                       |                                                              |                                                         |
+| Credit card installment usage analysis  | * total orders and gmv * merchant discount rate * total transaction fees |                                                              |                                                         |
+| Shopee PayLater product analysis        | * total gross/net orders                                     |                                                              |                                                         |
+| Marketing                               | Voucher sales analysis (non-DP e.g. grab vouchers)           | * total orders                                               |                                                         |
+| Marketing spend by promotion channels   |                                                              |                                                              |                                                         |
+
+---
+
+# Order Mart Tables
+
+## Real-time tables
+
+RT tables are tables to support more timely T0 analysis with data latency < 1 hour. 3-day of terminated orders (T-0, T-1, T-2) + all non-terminal data are available
+
+|                                                              |                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                   | Description                                                  | Data map link                                                |
+| rt\_dwd\_order\_all\_ent\_rf\_\_reg\_s0\_live                | This fact table stores all unterminated orders (grass\_date in 9999-01-01) as well as all past 3 days of terminated orders (grass\_date in T-0, T-1, T-2) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQHJ0X2R3ZF9vcmRlcl9hbGxfZW50X3JmX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484268523&usg=AOvVaw0LyZtuVYncPONxaPOE3nai) |
+| rt\_dwd\_order\_item\_all\_ent\_rf\_\_reg\_s0\_live          | This fact table stores all unterminated order items (grass\_date in 9999-01-01) as well as all past 3 days of terminated orders (grass\_date in T-0, T-1, T-2) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQHJ0X2R3ZF9vcmRlcl9pdGVtX2FsbF9lbnRfcmZfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484269565&usg=AOvVaw3j7GOmqDcLUq9mZotVcSHF) |
+| rt\_dwd\_order\_place\_pay\_complete\_ri\_\_reg\_s0\_live    | This fact table stores all place, pay and complete event of all orders made in past 3 days (grass\_date in T-0, T-1, T-2) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQHJ0X2R3ZF9vcmRlcl9wbGFjZV9wYXlfY29tcGxldGVfcmlfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484270365&usg=AOvVaw2CN9cDrFagZlFKplz5RdVb) |
+| rt\_dwd\_order\_item\_place\_pay\_complete\_ri\_\_reg\_s0\_live | This fact table stores all place, pay and complete event of all order items made in past 3 days (grass\_date in T-0, T-1, T-2) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQHJ0X2R3ZF9vcmRlcl9pdGVtX3BsYWNlX3BheV9jb21wbGV0ZV9yaV9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484271088&usg=AOvVaw0jbMWzlQ8n2cW8PG_YnXUH) |
+
+###
+
+## DWS tables
+
+Data warehouse efficiency is one of the most important metrics to measure the data warehouse build success. DWS tables are basically aggregated DWD tables, and this is a useful and good method to improve query performance. Pre-aggregated across dimensions to drastically improve query performance, save computational resources, solve caliber inconsistency issues.
+
+###
+
+|                                                              |                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                   | Business logic                                               | Data map link                                                |
+| mp\_order.dws\_item\_gmv\_1d\_\_reg\_s0\_live                | Item’s (item\_id)  aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) on a daily basis | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19pdGVtX2dtdl8xZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484273567&usg=AOvVaw3CcFw03VvtAQAvrlWqdunl) |
+| mp\_order.dws\_sku\_gmv\_1d\_\_reg\_s0\_live                 | SKU’s  (item\_id + model\_id) aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) on a daily basis | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19za3VfZ212XzFkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484274439&usg=AOvVaw1H-CHHHrS6T8Eq-IT18a9X) |
+| mp\_order.dws\_seller\_gmv\_1d\_\_reg\_s0\_live              | Shop’s (shop\_id) aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) on a daily basis | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19zZWxsZXJfZ212XzFkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484275265&usg=AOvVaw0IBNewU4XZCZ_MxwzN7ZV1) |
+| mp\_order.dws\_buyer\_gmv\_1d\_\_reg\_s0\_live               | Buyer’s (buyer\_id) aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) on a daily basis | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19idXllcl9nbXZfMWRfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484276096&usg=AOvVaw3yk2kpiGFGzhabFNYnc_29) |
+| mp\_order.dws\_buyer\_seller\_gmv\_1d\_\_reg\_s0\_live       | Buyer X Seller dimension aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) on a daily basis | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19idXllcl9zZWxsZXJfZ212XzFkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484276973&usg=AOvVaw1-UnIVnFoGz9z9uEBf81iJ) |
+| mp\_order.dws\_item\_gmv\_nd\_\_reg\_s0\_live                | Item’s (item\_id)  aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) for the past n days | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19pdGVtX2dtdl9uZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484277686&usg=AOvVaw1Gb2oJRk44d5L18UU8lY75) |
+| mp\_order.dws\_sku\_gmv\_nd\_\_reg\_s0\_live                 | SKU’s  (item\_id + model\_id) aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) for the past n days | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19za3VfZ212X25kX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484278528&usg=AOvVaw2OvAH7f5B0WII4lQkv-xC9) |
+| mp\_order.dws\_seller\_gmv\_nd\_\_reg\_s0\_live              | Shop’s (shop\_id) aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) for the past n days | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19zZWxsZXJfZ212X25kX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484279251&usg=AOvVaw1ruudWqkdYaQpvX_Ch0Y01) |
+| mp\_order.dws\_buyer\_gmv\_nd\_\_reg\_s0\_live               | Buyer’s (buyer\_id) aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) for the past n days | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19idXllcl9zZWxsZXJfZ212X25kX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484280079&usg=AOvVaw0h3twc3C3eqKstCEtQzga1) |
+| mp\_order.dws\_buyer\_seller\_gmv\_nd\_\_reg\_s0\_live       | Buyer X Seller dimension aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) for the past n days | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19idXllcl9zZWxsZXJfZ212X25kX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484281014&usg=AOvVaw3SEggsZE4fxvGFnrvxJhQy) |
+| mp\_order.dws\_item\_gmv\_td\_\_reg\_s0\_live                | Item’s (item\_id) total aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) since item’s listing | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19pdGVtX2dtdl90ZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484281916&usg=AOvVaw2O0xtatAA584TmleVwnlQa) |
+| mp\_order.dws\_sku\_gmv\_td\_\_reg\_s0\_live                 | SKU’s  (item\_id + model\_id) total aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) since item's listing | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19za3VfZ212X3RkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484282989&usg=AOvVaw0A55KVts4AD4u1m--_ukW_) |
+| mp\_order.dws\_seller\_gmv\_td\_\_reg\_s0\_live              | Shop’s (shop\_id)total  aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) since seller onboard | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19zZWxsZXJfZ212X3RkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484283768&usg=AOvVaw1_148s4-uG6qsP6KS6AHVZ) |
+| mp\_order.dws\_buyer\_gmv\_td\_\_reg\_s0\_live               | Buyer’s (buyer\_id) total  aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) since buyer’s first order | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19idXllcl9nbXZfdGRfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484284719&usg=AOvVaw0ZmBnOCjI7OW6eQ_5g3AjI) |
+| mp\_order.dws\_buyer\_seller\_gmv\_td\_\_reg\_s0\_live       | Buyer X Seller dimension aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) since buyer’s first order | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19idXllcl9zZWxsZXJfZ212X3RkX19yZWdfczBfbGl2ZQ%3D%3D/Column_Info&sa=D&source=editors&ust=1757790484285664&usg=AOvVaw1JrcHfo69d9gzV-EhLbJt2) |
+| mp\_order.dws\_item\_gmv\_mtd\_\_reg\_s0\_live               | Item’s (item\_id) total aggregated order related metrics (gmv\_1d, placed\_order\_cnt etc) since start of the month | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19pdGVtX2dtdl9tdGRfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484286421&usg=AOvVaw3jAaULJ7cPaD9i8JBxlFTo) |
+| mp\_order.dws\_sku\_gmv\_mtd\_\_reg\_s0\_live                | SKU’s (item\_id, model\_id) total aggregated order related metrics (gmv\_mtd, placed\_order\_cnt etc) since start of month | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19za3VfZ212X210ZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484287082&usg=AOvVaw3NZOOigmEklWwSrkJRO58_) |
+| mp\_order.dws\_seller\_gmv\_mtd\_\_reg\_s0\_live             | seller’s (shop\_id) total aggregated order related metrics (gmv\_mtd, placed\_order\_cnt etc) since start of month | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19zZWxsZXJfZ212X210ZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484287837&usg=AOvVaw2cU8mxkFUBEMW0BXYXZDUq) |
+| mp\_order.dws\_buyer\_purchase\_category\_td\_\_reg\_s0\_live | to-date table for buyer purchased categories metrics         | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19idXllcl9wdXJjaGFzZV9jYXRlZ29yeV90ZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484288637&usg=AOvVaw3DgLFdchm-stPn55jBwr2W) |
+| mp\_order.dws\_fe\_display\_category\_gmv\_1d\_\_reg\_s0\_live | aggregation summary of order related metrics for FE display category at category level | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19mZV9kaXNwbGF5X2NhdGVnb3J5X2dtdl8xZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484289526&usg=AOvVaw3uDaS7T6-YAPMmHSHlA4hk) |
+| mp\_order.dws\_fe\_display\_category\_gmv\_nd\_\_reg\_s0\_live | Aggregation summary of order related metrics for FE display category at category level for 1d/7d/30d/60d | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19mZV9kaXNwbGF5X2NhdGVnb3J5X2dtdl9uZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484290305&usg=AOvVaw1WAcKHx9HbcndHhJUSfJ_H) |
+| mp\_order.dws\_fe\_display\_category\_gmv\_td\_\_reg\_s0\_live | Aggregation summary of order related metrics for FE display category at category level till date. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19mZV9kaXNwbGF5X2NhdGVnb3J5X2dtdl90ZF9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484291278&usg=AOvVaw2mYCqznnbkBDhpIHIbx2af) |
+| mp\_order.dws\_global\_be\_category\_gmv\_1d\_\_reg\_s0\_live | Aggregation summary of order related metrics for global BE category at category level for a day | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19nbG9iYWxfYmVfY2F0ZWdvcnlfZ212XzFkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484292167&usg=AOvVaw35-LXdRFPIwT7hJpzFUsv7) |
+| mp\_order.dws\_global\_be\_category\_gmv\_nd\_\_reg\_s0\_live | Aggregation summary of order related metrics for global BE category at category level for 1d/7d/30d/60d | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19nbG9iYWxfYmVfY2F0ZWdvcnlfZ212X25kX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484293082&usg=AOvVaw1H8sbvOqa7P26kiCY1FOce) |
+| mp\_order.dws\_global\_be\_category\_gmv\_td\_\_reg\_s0\_live | Aggregation summary of order related metrics for global BE category at category level till date | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19nbG9iYWxfYmVfY2F0ZWdvcnlfZ212X3RkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484293841&usg=AOvVaw2FxKAwnlLpWlIwXLt_wchQ) |
+| mp\_order.dws\_kpi\_category\_gmv\_1d\_\_reg\_s0\_live       | Aggregation summary of order related metrics for KPI category at category level for a day | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19rcGlfY2F0ZWdvcnlfZ212XzFkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484294620&usg=AOvVaw1zVAU9Eh_P8TjI6Adm80T_) |
+| mp\_order.dws\_kpi\_category\_gmv\_nd\_\_reg\_s0\_live       | Aggregation summary of order related metrics for KPI category at category level for a 1d/7d/30d/60d | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19rcGlfY2F0ZWdvcnlfZ212X25kX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484295385&usg=AOvVaw1Z60mRP5Mw0nNd27shoF2m) |
+| mp\_order.dws\_kpi\_category\_gmv\_td\_\_reg\_s0\_live       | Aggregation summary of order related metrics for KPI category at category level till date | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19rcGlfY2F0ZWdvcnlfZ212X3RkX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484296052&usg=AOvVaw3edbHPFiXiER0V9zcqpMfx) |
+| Return & Refund                                              |                                                              |                                                              |
+| mp\_order.dws\_item\_return\_1d\_\_reg\_live                 | Contains escrow\_paid order count and refund paid order count today.     Primary key: shop\_id, item\_id, tz\_type, grass\_region, grass\_date    Please refer to the [release note](https://www.google.com/url?q=https://docs.google.com/document/d/1ab_3t9Qwg0RV8Dey4s8pbmrZJtv41mz8BH270OM_RSI/edit&sa=D&source=editors&ust=1757790484297401&usg=AOvVaw2AhSk_cmEO6pBvBob5Y_s2) for more information | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19pdGVtX3JldHVybl8xZF9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484297665&usg=AOvVaw3JyBIQSENyAG6iP-UFY933) |
+| mp\_order.dws\_item\_return\_nd\_\_reg\_live                 | Contains escrow\_paid order count and refund paid order count 1d, 7d, 14d and 30d.     Primary key: shop\_id, item\_id, tz\_type, grass\_region, grass\_date  Please refer to the [release note](https://www.google.com/url?q=https://docs.google.com/document/d/1ab_3t9Qwg0RV8Dey4s8pbmrZJtv41mz8BH270OM_RSI/edit&sa=D&source=editors&ust=1757790484298535&usg=AOvVaw3GB-cdJsaW-fyBUhovTLYV) for more information | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19pdGVtX3JldHVybl9uZF9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484298793&usg=AOvVaw0ngRzxiBQ3g4HiQDSfbYnf) |
+| Cart                                                         |                                                              |                                                              |
+| mp\_order.dws\_cart\_buyer\_td\_\_{reg/xx}\_live             | DWS table to support user-level aggregated valid\_model\_cnt, invalid\_model\_cnt on a daily basis    Primary keys: user\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19jYXJ0X2J1eWVyX3RkX19yZWdfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484300249&usg=AOvVaw3ZfS7ktoHNGuHDmLW3td41) |
+| mp\_order.dws\_cart\_buyer\_shop\_td\_\_{reg/xx}\_live       | DWS table to support user/shop level aggregated valid\_model\_cnt, invalid\_model\_cnt on a daily basis  Primary keys: user\_id, shop\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3c19jYXJ0X2J1eWVyX3Nob3BfdGRfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484301148&usg=AOvVaw0UyjfL9YDmIsndym050TkW) |
+
+###
+
+## DWD tables
+
+DWD tier is modeled based on multidimensional data model design, after fact and dimension table. It should be segregated based on the data zone for different business lines, as abstracted by DE. DWD is also used for the development of DWS and data cubes. In other words, this is known as an event level table - for example, each order dictates each new row update.
+
+### Order All
+
+|                                                              |                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                   | Description                                                  | Data map link                                                |
+| mp\_order.dwd\_order\_place\_pay\_complete\_di\_\_reg\_s0\_live | Contains order transaction snapshots when the order is placed, paid and completed. Metrics of the orders are not updated afterwards.     Primary key: order\_id     Refer to[above section](https://www.google.com/url?q=https://docs.google.com/document/d/1NkpDYLikLCRliJubXTbK3GXpLxa-0-G03Ud5OaX0rWI/edit%23heading%3Dh.4a7jd7cciqfm&sa=D&source=editors&ust=1757790484303400&usg=AOvVaw2QlEpV02IUS2BOjkMajpUi) for more details | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9vcmRlcl9wbGFjZV9wYXlfY29tcGxldGVfZGlfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484303720&usg=AOvVaw1qy64D7_8ItGcnRisxDeCB) |
+| mp\_order.dwd\_order\_item\_place\_pay\_complete\_di\_\_reg\_s0\_live | Contains order item transaction snapshots when the order is placed, paid and completed. Metrics of the order items are not updated afterwards.     Primary key: order\_id, item\_id, model\_id, bundle\_order\_item\_id, group\_id, line\_item\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9vcmRlcl9pdGVtX3BsYWNlX3BheV9jb21wbGV0ZV9kaV9fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484304781&usg=AOvVaw2oTyBPfeW9qJimEd5JQ642) |
+| mp\_order.dwd\_order\_all\_ent\_df\_\_reg\_s0\_live          | Contains all order transaction details, all orders are updated until they reach terdminal status.     Primary key: order\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9vcmRlcl9hbGxfZW50X2RmX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484305600&usg=AOvVaw2fWRS0IP5Ag-Wc5CWWeYoX) |
+| mp\_order. dwd\_order\_item\_all\_ent\_df\_\_reg\_s0\_live   | Contains all order item transaction details, all order items are updated until they reach terminal status.     Primary key: order\_id, item\_id, model\_id, bundle\_order\_item\_id, group\_id, line\_item\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9vcmRlcl9pdGVtX2FsbF9lbnRfZGZfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484306722&usg=AOvVaw3nml4H956D7H8j4VzWovYN) |
+| mp\_order.dwd\_order\_item\_service\_fee\_all\_ent\_df\_\_reg\_s0\_live | Contains order item service fee information.    Primary key: order\_id, item\_id, model\_id, bundle\_order\_item\_id, group\_id, rule\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9vcmRlcl9pdGVtX3NlcnZpY2VfZmVlX2FsbF9lbnRfZGZfX3JlZ19zMF9saXZl/Column_Info&sa=D&source=editors&ust=1757790484308159&usg=AOvVaw0dfYfM4KouXtHUDqpDLvop) |
+
+### Order Fulfillment (logistics)
+
+A new entity will be created from the order side called order fulfillment order will store order logistics fields. order\_logistics\_v2\_tab/logistics\_audit\_tab
+
+ will be deprecated in the future and order\_fulfilment\_order\_tab will be created in OFG DB
+
+For more information, please refer to [https://confluence.shopee.io/display/SPCT/%5BTD%5D+Migrate+Logistics+Filed+from+ODO+to+OFG](https://www.google.com/url?q=https://confluence.shopee.io/display/SPCT/%255BTD%255D%2BMigrate%2BLogistics%2BFiled%2Bfrom%2BODO%2Bto%2BOFG&sa=D&source=editors&ust=1757790484309266&usg=AOvVaw19DFy6lFX0fjP-Zh1hAb9v)
+
+The order mart table design is based on marketplace order\_logistics\_v2\_tab/logistics\_audit\_tab, after the migration to order\_fulfilment\_order\_tab is completed, we will handle our migration accordingly. Mart table users won’t be affected by the migration.
+
+For the order mart tables, we follow the naming convention of the new entity: order fulfillment order.
+
+_The image is a flowchart depicting the order fulfillment process. It includes the following key elements:
+
+1. **Checkout**: The initial step where the customer completes the purchase.
+2. **Order**: The next step where the order is created and processed.
+3. **Order Item**: Represents the individual items within the order.
+4. **Order Fulfillment Order (new)**: A specific type of order related to order fulfillment, highlighted in red.
+5. **Order Fulfillment Group**: A group or team responsible for fulfilling the order.
+6. **Order level logistics**: The process or system that handles logistics at the order level.
+
+The flowchart illustrates the sequence and relationships between these components in the order fulfillment process._
+
+
+Note: for historical orders, there is no OFG associated with OFOrder, therefore OFOrder can be mapped to NULL OFG.
+
+[Business Domain Knowledge](#h.punhnzdx400t)
+
+|                                                         |                                                              |                                                              |
+| ------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                              | Description                                                  | Data map link                                                |
+| mp\_order.dwd\_ofo\_all\_ent\_di\_\_reg\_live           | Daily incremental order fulfillment order (order logistics) tables.  Contains key information related to order level fulfillment(logistics):  logistics status, keys timestamps ,  fulfillment channel, delivery information , and shipping fee, rebate, discount related metrics.    Each grass\_date contains the records that are created or updated on that day.    Primary key: order\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9vZm9fYWxsX2VudF9kaV9fcmVnX2xpdmU%3D/Column_Info&sa=D&source=editors&ust=1757790484313594&usg=AOvVaw1iz-803nDeAarqMlfdKxpj) |
+| mp\_order.dwd\_ofo\_all\_ent\_snapshot\_df\_\_reg\_live | Daily snapshot table of order fulfillment order (order logistics).  New /updated logistics records will be inserted on a daily basis.    To get the latest full snapshot, please use T-1 grass\_date    Primary key: order\_id    For column mapping between this table and order\_logistics\_v2, please refer to  [Order Mart Table Mapping](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/1r-W_w913ecV5XdlTBx0VNHLHgtCepNUEqJfXkiMxM7w/edit%23gid%3D1383615687&sa=D&source=editors&ust=1757790484315545&usg=AOvVaw1QAgwt5-fhobEwEQ0VnH37) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kI1VTRWFzdEBtcF9vcmRlckBkd2Rfb2ZvX2FsbF9lbnRfc25hcHNob3RfZGZfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484315949&usg=AOvVaw0fgHTlT5_J1tm2uiJNii5k) |
+| mp\_order.dwd\_ofo\_audit\_snapshot\_df\_\_reg\_live    | This is a daily snapshot table of order fulfillment order(order logistics) full audit history. New /updated audit will be inserted on a daily basis.    To get the latest full snapshot, please use T-1 grass\_date    Primary key: audit\_id    For column mapping between this table and logistics\_audit\_v3, please refer to [Order Mart Table Mapping](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/1r-W_w913ecV5XdlTBx0VNHLHgtCepNUEqJfXkiMxM7w/edit%23gid%3D1755965094&sa=D&source=editors&ust=1757790484317838&usg=AOvVaw24SoBGI2bW80tBJix6XX5k) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9vZm9fYXVkaXRfc25hcHNob3RfZGZfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484318171&usg=AOvVaw2p-mnF4umfmbSiKZyZ9BZB) |
+| mp\_order.dwd\_ofg\_lost\_snapshot\_df\_\_reg\_live     | This is a daily snapshot table of lost order (order logistics) full history. New /updated lost records will be inserted on a daily basis.    To get the latest full snapshot, please use T-1 grass\_date |                                                              |
+
+### Return & Refund
+
+[Business Domain Knowledge](#h.f5rf57ohr4sb)
+
+|                                                              |                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                   | Description                                                  | Data map link                                                |
+| mp\_order.dwd\_return\_all\_ent\_snapshot\_df\_\_reg\_live    Migrated to mp\_order.[dwd\_return\_all\_ent\_df\_\_reg\_live](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5fYWxsX2VudF9kZl9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484320646&usg=AOvVaw31ZEszfX1W8M8UwPmwuT3A) | Daily full snapshot table of return cases. This table is return-level  To get the latest full snapshot, please use T-1 grass\_date    Primary key: return\_id    For column mapping between return mart table and return\_v2, please refer to    [Order Mart Table Mapping](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/1r-W_w913ecV5XdlTBx0VNHLHgtCepNUEqJfXkiMxM7w/edit%23gid%3D881669295&sa=D&source=editors&ust=1757790484321931&usg=AOvVaw35v58_BmV75kCO_VLXG6_0) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5fYWxsX2VudF9zbmFwc2hvdF9kZl9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484322270&usg=AOvVaw3mp6c3tZ52A2pPsZOfJ6-X) |
+| mp\_order.dwd\_return\_all\_ent\_di\_\_reg\_live             | Daily incremental table return cases. Each grass\_date contains the records that are created or updated on that day.    Primary key: return\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5fYWxsX2VudF9kaV9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484323298&usg=AOvVaw1R-bcUYzENdPEsL9feZ2OT) |
+| mp\_order.dwd\_return\_item\_all\_ent\_df\_\_reg\_s0\_live   | Contains all order item details of a return case details, all return case orders items are updated until they reach terminal status.  Return-item level.      Primary key: return\_id, order\_id, item\_id, model\_id, bundle\_order\_item\_id, group\_id    For column mapping between return mart table and return\_v2, please refer to [Order Mart Table Mapping](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/1r-W_w913ecV5XdlTBx0VNHLHgtCepNUEqJfXkiMxM7w/edit%23gid%3D881669295&sa=D&source=editors&ust=1757790484324677&usg=AOvVaw2HZXWF0zrAVRchRxEhYX40) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5faXRlbV9hbGxfZW50X2RmX19yZWdfczBfbGl2ZQ%3D%3D/Column_Info&sa=D&source=editors&ust=1757790484325356&usg=AOvVaw0r26STMnSmVsh7vubaCe1m) |
+| mp\_order.dwd\_return\_logistics\_all\_ent\_di\_\_reg\_live  | Contains daily incremental records for reverse logistics.    Each grass\_date contains the records that are created or updated on that day.  Primary key: return\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5fbG9naXN0aWNzX2FsbF9lbnRfZGlfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484326573&usg=AOvVaw0GqG3vfbg_zGzb-OfO5b4w) |
+| mp\_order.dwd\_return\_logistics\_all\_ent\_snapshot\_df\_\_reg\_live | Daily full snapshot table of return logistics. New /updated records  will be inserted on a daily basis.    To get the latest full snapshot, please use T-1 grass\_date    Primary key: return\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5fbG9naXN0aWNzX2FsbF9lbnRfc25hcHNob3RfZGZfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484328162&usg=AOvVaw1f67p_maNNS8pACaXp9e11) |
+| mp\_order.dwd\_refund\_all\_ent\_di\_\_reg\_live             | Contains daily incremental records for refund cases.    Primary key: refund\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZWZ1bmRfYWxsX2VudF9kaV9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484329149&usg=AOvVaw1OE7h1iREJxsNowFiMLVA1) |
+| mp\_order.dwd\_refund\_all\_ent\_df\_\_reg\_live             | Daily full snapshot table of refund cases.  New /updated records  will be inserted on a daily basis. Retention is 3 days.    To get the latest full snapshot, please use T-1 grass\_date    Primary key: refund\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZWZ1bmRfYWxsX2VudF9kZl9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484330566&usg=AOvVaw0OuSAnrMxbvmtEtRlHuoDp) |
+| mp\_order.dwd\_return\_drc\_dispute\_audit\_snapshot\_df\_\_reg\_live | Daily full snapshot table of drc dispute audit data.  To get the latest full snapshot, please use T-1 grass\_date    Primary\_key: audit\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5fZHJjX2Rpc3B1dGVfYXVkaXRfc25hcHNob3RfZGZfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484331809&usg=AOvVaw1m5MhNO_XxRkWcFZ9QtEAY) |
+| mp\_order.dwd\_return\_drc\_dispute\_offer\_snapshot\_df\_\_reg\_live | Daily full snapshot table of drc dispute offer data.  To get the latest full snapshot, please use T-1 grass\_date    Primary\_key: dispute\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5fZHJjX2Rpc3B1dGVfb2ZmZXJfc25hcHNob3RfZGZfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484333052&usg=AOvVaw0CYuphaXValLMEAbRLGX1k) |
+| mp\_order.dwd\_return\_drc\_dispute\_survey\_snapshot\_df\_\_reg\_live | Daily full snapshot table of drc dispute survey data.  To get the latest full snapshot, please use T-1 grass\_date    Primary\_key: dispute\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9yZXR1cm5fZHJjX2Rpc3B1dGVfc3VydmV5X3NuYXBzaG90X2RmX19yZWdfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484334292&usg=AOvVaw2Znjl2Uue-tR7EJblTyIwE) |
+
+### Escrow
+
+|                                                            |                                                              |                                                              |
+| ---------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                 | Description                                                  | Data map link                                                |
+| Mp\_order.dwd\_escrow\_all\_ent\_snapshot\_df\_\_reg\_live | Daily full snapshot table of escrow level data.  To get the latest full snapshot, please use T-1 grass\_date    Primary key: order\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9lc2Nyb3dfYWxsX2VudF9zbmFwc2hvdF9kZl9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484336393&usg=AOvVaw2r0dtAfIMY7z9cnCdbQdMT) |
+| mp\_order.dwd\_escrow\_all\_ent\_di\_\_reg\_live           | Contains daily incremental records for escrow data.  Each grass\_date contains the records that are created or updated on that day.    Primary key order\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9lc2Nyb3dfYWxsX2VudF9kaV9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484337429&usg=AOvVaw2RxlHOd5g9vnKLuQv5Ht-D) |
+
+###
+
+### Checkout
+
+|                                                              |                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                   | Table Description                                            | Data map link                                                |
+| mp\_order.dwd\_checkout\_all\_ent\_snapshot\_df\_\_{reg/xx}\_live | Daily full snapshot table of checkout records. New /updated checkouts will be inserted on a daily basis.    To get the latest full snapshot, please use T-1 grass\_date.    Primary keys: checkout\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9jaGVja291dF9hbGxfZW50X3NuYXBzaG90X2RmX19yZWdfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484339304&usg=AOvVaw0D4PntU4QrlD60o4NEHr6s) |
+| mp\_order.dwd\_checkout\_all\_ent\_di\_\_{reg/xx}\_live      | Daily incremental table for checkout records.  Each grass\_date contains the records that are created or updated on that day.    Primary key: checkout\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9jaGVja291dF9hbGxfZW50X2RpX19yZWdfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484340267&usg=AOvVaw3kSl6sXW_wUr9wb76twK8p) |
+| mp\_order.dwd\_checkout\_audit\_snapshot\_df\_\_{reg/xx}\_live | This is a daily snapshot table of checkout full audit history. New /updated audit will be inserted on a daily basis.    To get the latest full snapshot, please use T-1 grass\_date    Primary key: audit\_id | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9jaGVja291dF9hdWRpdF9zbmFwc2hvdF9kZl9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484341560&usg=AOvVaw2pbb8iTw164EyDn9xyw-8_) |
+
+###
+
+### Cart
+
+|                                                              |                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                   | Table Description                                            | Data map link                                                |
+| mp\_order.dwd\_cart\_model\_all\_ent\_snapshot\_df\_\_{reg/xx}\_live | This is a daily snapshot table of user cart data, the granularity is user/shop/item/model level,  We include key dimensions and attributes for cart-related analysis.  The retention period for this table is 30 days.  Primary keys: user\_id, shop\_id, item\_id, model\_id    Take note that digital products are filtered away.  For more details, please refer to [UAT User guide](https://www.google.com/url?q=https://docs.google.com/document/d/1RtLhMVsGZhDM5WRWCyHTIEo4--NorrFoqWWCQbjJC1w/edit%23heading%3Dh.x1yz5ipt9dg9&sa=D&source=editors&ust=1757790484344002&usg=AOvVaw3KTUkgZdTUTkrsJZLZ8Tj9)    [Column description and mapping with cart\_v2](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/1InBLMaXtv9kYdXR42BQlk-UangKm4hKQ71pTEUFfvUU/edit%23gid%3D65067756&sa=D&source=editors&ust=1757790484344415&usg=AOvVaw1NbaxV9qK0blrpnn23KPca) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9jYXJ0X21vZGVsX2FsbF9lbnRfc25hcHNob3RfZGZfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484344690&usg=AOvVaw34BLMi2JVdeTd8fgzPbSP2) |
+
+### STS and Seller Wallet
+
+Settlement tables
+
+[Business Domain Knowledge](#h.t7l9imm1oks7)
+
+|                                                        |                                                              |                                                              |
+| ------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                             | Table Description                                            | Data map link                                                |
+| dwd\_sts\_billing\_item\_all\_ent\_df\_\_reg\_live     | It contains PAID escrow and adjustments from old STS and all billing items in new STS.  Each billing item can be associated with up to N number of payouts, depending on the number of payout retries.    The records are updated until the billing item reaches terminal state (i.e. payout\_paid or payout\_failed).    Grass\_date is defined by the date in which the billing item reaches terminal state.  Grass\_date=date ‘9999-01-01', means that billing\_item is still in non terminal state | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9zdHNfYmlsbGluZ19pdGVtX2FsbF9lbnRfZGZfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484347772&usg=AOvVaw3tGIe09LF01M-fzf2OvM0S) |
+| dwd\_sts\_adjustment\_batch\_all\_ent\_df\_\_reg\_live | Contain details about all batch adjustments created. 1 batch adjustment record can contain N number of adjustments. Is updated until adjustment\_batch reaches terminal state (i.e. rejected or finished)    Grass\_date is defined by the date in which the adjustment batch reaches terminal state.If grass\_date=date ’9999-01-01’, means that adjustment batch is still in non terminal state | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9zdHNfYWRqdXN0bWVudF9iYXRjaF9hbGxfZW50X2RmX19yZWdfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484349429&usg=AOvVaw0xVt_a6ejgqMDTiZYqW6I_) |
+| dwd\_sts\_payout\_all\_ent\_df\_\_reg\_live            | Contains paid payouts from old STS and all payouts from new STS.  1 payout record can contain N  billing\_items.Data is updated until payout reaches terminal state (i.e. payout\_status\_failed or payout\_status\_paid)    Grass\_date is defined by the date in which the payout reaches terminal state    If grass\_date=date’9999-01-01’, means that payout is still in non terminal state | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9zdHNfcGF5b3V0X2FsbF9lbnRfZGZfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484351179&usg=AOvVaw1SjUpufPUmNPtMCcRcCW6d) |
+| dim\_sts\_account\_\_reg\_live                         | Contain details about each account, including the ‘balance’ of each account (amount that shopee owes the seller) on a daily snapshot basis. Each shop can have M number of accounts.  There are 2 definitions of ‘balance’:  1. Balance\_amt - refers to SUM(billing\_item\_amt) WHERE item\_status= STATEMENTED  2. Unpaid\_balance\_amt - refers to SUM(billing\_item\_amt) as long as a payout is not created for the billing\_item  This is a daily snapshot table, hence each grass\_date partition represents a snapshot of each user’s account details including the account balance.      You can plot a trend of the account balance across grass\_date to see the fluctuations in the account balance. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9zdHNfYWNjb3VudF9fcmVnX2xpdmU%3D/Column_Info&sa=D&source=editors&ust=1757790484353144&usg=AOvVaw1SDlSebWHFJJuXAqteTFGp) |
+| dim\_sts\_adjustment\_reason\_\_reg\_live              | Contain details about all adjustment reasons configured. 1 billing item may have an adjustment reason, if the billing item type is an adjustment.  This is a daily snapshot table. Please use grass\_date = D-1 for the latest snapshot. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9zdHNfYWRqdXN0bWVudF9yZWFzb25fX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484354196&usg=AOvVaw0Oqr36sFzW_sB1bcRIndOk) |
+| dim\_sts\_settlement\_rule\_snapshot\_\_reg\_live      | Contain details about all settlement rules that each account follows for periodic auto payout. Each settlement account must be tagged to one and only one settlement rule at the same time.    This is a daily snapshot table. Please use grass\_date = D-1 for the latest snapshot. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9zdHNfc2V0dGxlbWVudF9ydWxlX3NuYXBzaG90X19yZWdfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484355251&usg=AOvVaw3nxEA-KtNbXE_2FMzABXyQ) |
+
+Seller Wallet Tables
+
+As of 2022, all local order wallet transactions  go through the seller wallet system owned by seller finance. On 16 Nov 2022, seller finance team will be carrying out a db migration which is in line with their project to integrate with shopeepay wallet engine.
+
+Order mart will be providing 1) seller wallet transaction and 2) withdrawal mart tables for data users migrate to. With these mart tables, users will only need to migrate to mart once, and not have to deal with a second round of migration split by market.
+
+NOTE: we will NOT be covering the seller wallet balance entity itself as this balance has been completely migrated to shopeepay.
+
+|                                                              |                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                   | Table Description                                            | Data map link                                                |
+| dwd\_seller\_wallet\_transaction\_all\_ent\_di\_\_{cid}\_live | Event table that stores new transaction events    For the latest seller wallet balance, you can take the new\_available\_amt belonging to the latest transaction of each user\_id/shop using MAX(create\_timestamp)    Else, you can also check with shopeepay team as wallet balance entity has shifted to shopeepay    PIC: phamthu.nguyenminh@seamoney.com      To understand the seller wallet tx types, please refer to : [Seller Wallet TransactionType APIs as of 21 Jun](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/1iVGXbrpY3s-ynvvkNS3KnbCLxIkE-3xbk4e9FiEF0rA/edit%23gid%3D0&sa=D&source=editors&ust=1757790484358384&usg=AOvVaw2DiheGHp_IPLN_doxRou5k) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9zZWxsZXJfd2FsbGV0X3RyYW5zYWN0aW9uX2FsbF9lbnRfZGlfX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484358684&usg=AOvVaw13KwlO08W4Rg4npU8Sn89u) |
+| dwd\_seller\_wallet\_withdrawal\_all\_ent\_df\_\_{cid}\_live | Withdrawal entity table that stores the updated state of each withdrawal entity | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGR3ZF9zZWxsZXJfd2FsbGV0X3dpdGhkcmF3YWxfYWxsX2VudF9kZl9fcmVnX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484359408&usg=AOvVaw2sCMhb3zxdQoS-tlcWaOTd) |
+
+## DIM tables
+
+A dimension table stores attributes, or dimensions, that describe the objects in a fact table. Dimensions categorize and describe data warehouse facts and measures in ways that support meaningful answers to business questions.
+
+### Order All
+
+|                                                          |                                                              |                                                              |
+| -------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                               | Business logic                                               | Data map link                                                |
+| mp\_order.dim\_exchange\_rate\_\_reg\_s0\_live           | This table provides the exchange rate for all countries. The exchange rate values are provided by SEA Finance on every last working day of the month. Note that the exchange rate is not update real time, instead the exchange rates for the on-going month is based on the actual average of the rates from the previous month. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9leGNoYW5nZV9yYXRlX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484362241&usg=AOvVaw3nqkxeEPmKAzGdPp-HTFC8) |
+| mp\_order.dim\_coin\_cash\_exchange\_\_reg\_s0\_live     | this table provides the coin exchange rate for all countries | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9jb2luX2Nhc2hfZXhjaGFuZ2VfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484363205&usg=AOvVaw3ysPN8CnfdO4FmpCJh4x7e) |
+| mp\_order.dim\_order\_backend\_status\_\_reg\_s0\_live   | this table provides the enum mapping for order backend status | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9vcmRlcl9iYWNrZW5kX3N0YXR1c19fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484364202&usg=AOvVaw1YHheacSCLdUGaDtuKW9vN) |
+| mp\_order.dim\_estimate\_3pl\_cashback\_\_reg\_s0\_live  | this table provides the estimated 3PL cashback               | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9lc3RpbWF0ZV8zcGxfY2FzaGJhY2tfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484365180&usg=AOvVaw0eLOdvkKnoD3yD3mBROalV) |
+| mp\_order.dim\_order\_return\_status\_\_reg\_s0\_live    | this table provides the enum mapping for order return status | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9vcmRlcl9yZXR1cm5fc3RhdHVzX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484366105&usg=AOvVaw1WvaRuUIXHPuIjla6raYpN) |
+| mp\_order.dim\_product\_promotion\_type\_\_reg\_s0\_live | this table provides the enum mapping for item promotion type | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9wcm9kdWN0X3Byb21vdGlvbl90eXBlX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484367064&usg=AOvVaw36KnlkmshfE--ywnMNJxl0) |
+| mp\_order.dim\_order\_cancel\_reason\_\_reg\_s0\_live    | this table provides the enum mapping for order cancel reason | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9vcmRlcl9jYW5jZWxfcmVhc29uX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484368064&usg=AOvVaw2aAumZMhtiaLJKUiVi_k4m) |
+| mp\_order.dim\_order\_frontend\_status\_\_reg\_s0\_live  | this table provides the enum mapping for order frontend status | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9vcmRlcl9mcm9udGVuZF9zdGF0dXNfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484369047&usg=AOvVaw2qYIygwZjr5TE81tdx8Xsh) |
+| mp\_order.dim\_buyer\_cancel\_reason\_\_reg\_s0\_live    | this table provides the enum mapping for buyer cancel reason | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9idXllcl9jYW5jZWxfcmVhc29uX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484369972&usg=AOvVaw1ymWYs4n4t4Q0y6Rm1NATa) |
+| mp\_order. dim\_actual\_3pl\_cashback\_\_reg\_s0\_live   | this table provides the actual 3pl cashback                  | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9hY3R1YWxfM3BsX2Nhc2hiYWNrX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484370997&usg=AOvVaw1N3mY804GFy9c_3SYYqN0K) |
+
+#
+
+### Order Fulfillment (logistics)
+
+|                                                   |                                                              |                                                              |
+| ------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                        | Business logic                                               | Data map link                                                |
+| mp\_order.dim\_logistics\_status\_\_reg\_s0\_live | This table provides the enum mapping for forward logistics status. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9sb2dpc3RpY3Nfc3RhdHVzX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484372705&usg=AOvVaw1bI5QECozUUDDxirUlu-ts) |
+
+### Return & Refund
+
+|                                                              |                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                                   | Business logic                                               | Data map link                                                |
+| mp\_order.dim\_return\_logistics\_status\_\_reg\_s0\_live    | This table provides the enum mapping for return logistics status | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9yZXR1cm5fbG9naXN0aWNzX3N0YXR1c19fcmVnX3MwX2xpdmU%3D/Table_Info&sa=D&source=editors&ust=1757790484373853&usg=AOvVaw2sc3D4aL8DsBSr2pxRIgHv) |
+| mp\_order. dim\_order\_return\_dispute\_reason\_\_reg\_s0\_live | This table provides the enum mapping for order return dispute reason | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9vcmRlcl9yZXR1cm5fZGlzcHV0ZV9yZWFzb25fX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484374517&usg=AOvVaw1MX3nTR9_Z83MbR90-Vhmd) |
+| mp\_order.dim\_order\_return\_reason\_\_reg\_s0\_live        | This table provides the enum mapping for order return status | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9vcmRlcl9yZXR1cm5fcmVhc29uX19yZWdfczBfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484375063&usg=AOvVaw0Unax6OPJmocaxyXj35jga) |
+
+#
+
+#
+
+### Payment
+
+|                                                      |                                                              |                                                              |
+| ---------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                           | Business logic                                               | Data map link                                                |
+| mp\_order.dim\_payment\_be\_channel\_\_reg\_s0\_live | This table provides the enum mapping for payment\_be\_channel, details the relationship between payment\_be\_channel, payment\_spm\_channel and payment\_method, as well as groups the channels according to the payment mapping framework into L1 and L2 categories.  L1 level represents the regional level mapping and is shared by all local teams.  L2 level represents the local level mapping and is unique to each local team.  For more details for the mapping, please refer to this [L1L2\_mapping](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/1YPlcH3IrhtmdC9nhyFVaqzFoWOMAtLPRq8z-j9fBKno/edit%23gid%3D1439599864&sa=D&source=editors&ust=1757790484376820&usg=AOvVaw2XD6jDrws7876cEVBhfH3f) | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9wYXltZW50X2JlX2NoYW5uZWxfX3JlZ19zMF9saXZl/Table_Info&sa=D&source=editors&ust=1757790484377125&usg=AOvVaw17qvHKbp5mSvrexU4U2DWn) |
+
+#
+
+### Settlement
+
+|                                                    |                                                              |                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Table name                                         | Business logic                                               | Data map link                                                |
+| dim\_sts\_account\_\_reg\_live                     | Contain details about each account, including the ‘balance’ of each account (amount that shopee owes the seller) on a daily snapshot basis. Each shop can have M number of accounts.  There are 2 definitions of ‘balance’:  1. Balance\_amt - refers to SUM(billing\_item\_amt) WHERE item\_status= STATEMENTED  2. Unpaid\_balance\_amt - refers to SUM(billing\_item\_amt) as long as a payout is not created for the billing\_item  This is a daily snapshot table, hence each grass\_date partition represents a snapshot of each user’s account details including the account balance.      You can plot a trend of the account balance across grass\_date to see the fluctuations in the account balance. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9zdHNfYWNjb3VudF9fcmVnX2xpdmU%3D/Column_Info&sa=D&source=editors&ust=1757790484379559&usg=AOvVaw0BUB-ZVtp_a2sNsuL7mCqZ) |
+| dim\_sts\_adjustment\_reason\_\_reg\_live          | Contain details about all adjustment reasons configured. 1 billing item may have an adjustment reason, if the billing item type is an adjustment.  This is a daily snapshot table. Please use grass\_date = D-1 for the latest snapshot. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9zdHNfYWRqdXN0bWVudF9yZWFzb25fX3JlZ19saXZl/Table_Info&sa=D&source=editors&ust=1757790484380857&usg=AOvVaw2-u5QPZUOF2zhWBnHmlQEV) |
+| dim\_sts\_settlement\_rule\_snapshot\_\_reg\_live  | Contain details about all settlement rules that each account follows for periodic auto payout. Each settlement account must be tagged to one and only one settlement rule at the same time.    This is a daily snapshot table. Please use grass\_date = D-1 for the latest snapshot. | [link](https://www.google.com/url?q=https://datasuite.shopee.io/datamap/data-warehouse/HIVE/aGl2ZUBwcm9kQG1wX29yZGVyQGRpbV9zdHNfc2V0dGxlbWVudF9ydWxlX3NuYXBzaG90X19yZWdfbGl2ZQ%3D%3D/Table_Info&sa=D&source=editors&ust=1757790484382299&usg=AOvVaw2O9ZTQJVo6mkP_GxbvCqkf) |
+| mp\_order.dim\_ac\_adjustment\_reason\_\_reg\_live |                                                              |                                                              |
+
+# Order Mart Defined Logic
+
+## Terminal Status
+
+Old terminal logic
+
+order\_be\_status\_id in (6,8,11) to determine whether the order is terminal
+
+_The image is completely black and does not contain any discernible content, icons, or information._
+
+
+New terminal logic
+
+Background: Previously, buyers were not able to raise online Return/Refund once the order was completed. Now [a new feature](https://www.google.com/url?q=https://docs.google.com/presentation/d/1Zxqg5PlG59IsE7fiW9dCi6cXqxfsiJOzjZbwIFCasAI/edit?userstoinvite%3Dthiarm@sea.com%26actionButton%3D1%23slide%3Did.g135a84e631f_0_520&sa=D&source=editors&ust=1757790484384415&usg=AOvVaw0GYglHFY6dkbFO73txRsum) was launched by the RR team to allow buyers to raise Return/Refund within a valid period after order is completed. A return\_request\_due\_date is set, before this date, buyers can raise RR. This change will affect our current terminal logic for orders.
+
+There is a 2nd new feature which allows agents to help raise RR on behalf of users after the first return request due date. There will be an agent return request due date for RR.
+
+When allowing RR after order completed,we can no longer rely on the order entity's status alone to determine whether the order is terminal (return\_processing and return\_completed are removed from the order state machine). After the order is escrow\_paid, we need to look at the return entity's status to determine whether the order's return is terminal.
+
+There are two due dates (return\_request\_due\_date and agent\_return\_request\_due\_date), before which return can still happen even after the order is escrow paid.
+
+_The image is completely black and does not contain any discernible content, icons, or information._
+
+
+## Net orders
+
+For Marketplace, orders which fulfill all criteria are considered as net:
+
+* The order was not canceled, where be\_status is not in ( 'Cancel\_Completed') in order\_mart.
+* The order was not returned, where status is not in (2, 5) in shopee\_return\_v2\_db\_\_return\_v2\_tab.
+* The order was not made invalid, where be\_status != "Invalid" in order\_mart.
+
+Net orders are used to calculate metrics like NMV or net orders etc.
+
+These orders are tagged as 1 in the is\_net\_order column.
+
+Note: net status of an order could change until order reached terminal status
+
+Please take note that as of March 2021, there was a re-alignment on the definition of net orders. Do refer to this documentation for more information: [https://docs.google.com/presentation/d/1LnrqEy1gvyRkGU1LaSCQ3cQwmJ\_T5T2zysTIf5xdg0s/edit#slide=id.g71cd0dd9f1\_4\_56](https://www.google.com/url?q=https://docs.google.com/presentation/d/1LnrqEy1gvyRkGU1LaSCQ3cQwmJ_T5T2zysTIf5xdg0s/edit%23slide%3Did.g71cd0dd9f1_4_56&sa=D&source=editors&ust=1757790484388887&usg=AOvVaw0hXKKbqByr7q89oOHCL-dl)
+
+In summary, as long as the order is not “CANCEL\_COMPLETED”, “ INVALID”, or a Fully Refunded Order (meaning nmv > 0) then it will be considered a net order.
+
+New Logic:
+
+ CASE WHEN
+
+    order\_be\_status\_id IN (6, 8) OR
+    
+    (return\_info.is\_net\_order = 0 AND nmv = 0)
+
+THEN 0
+
+ELSE 1 END  AS is\_net\_order
+
+##
+
+## Metrics Prorate logic
+
+There are 2 key concepts that need to be known when using order\_item dwd tables to do aggregation.
+
+The first concept is Order fraction, the column is used to sum up orders count when doing aggregation using item level dimensions (e.g. catgegory).
+
+The second concept is split factor. As metrics are not always available at the lowest granularity, split factors are used to prorate the metrics from a higher to lower granularity. For example:
+
+* order -> order-item (e.g. shipping fees related metrics)
+* bundle deal -> individual items
+
+* items bought in a single bundle deal are considered a one order item, there stored as a single record in the order\_item\_v3, a dummy itemid is assigned, the bundle order items info are put into extinfo.
+* In order mart we split the bundle into single bundle order items
+* For eg, if a bundle deal A consists of SKU B and SKU C, in order\_item\_v3, there will be one row for bundle deals, the item\_id will dummy number, in order mart there will be two entries for each bundle order item, SKU B and SKU C. Attributes such as fees are split into single bundle order item level.
+
+order\_item\_v3\_tab
+
+|           |                    |           |                  |                                           |                           |
+| --------- | ------------------ | --------- | ---------------- | ----------------------------------------- | ------------------------- |
+| order\_id | item\_id           | model\_id | bundle\_deal\_id | item\_list  (info of items in this bundle | Other columns (i.e. fees) |
+| 123       | 1 (dummy item\_id) | 0         | 456              | {SKU B, SKUC}                             | Bundle level              |
+
+                                                                           _The image is completely black and does not contain any discernible content, icons, or text. Therefore, it does not provide any useful information._
+
+
+dwd\_order\_item\_all\_ent
+
+|           |                |                 |                  |                                           |                                            |
+| --------- | -------------- | --------------- | ---------------- | ----------------------------------------- | ------------------------------------------ |
+| order\_id | item\_id       | model\_id       | bundle\_deal\_id | item\_list  (info of items in this bundle | Other columns (i.e. fees)                  |
+| 123       | SKU B -itemid  | SKU B - modeld  | 456              | nill                                      | Prorated to Single bundle order item level |
+| 123       | SKU C - itemid | SKU C - modelid | 456              | nill                                      | Prorated to Single bundle order item level |
+
+_The image is completely black, indicating that there is no visual content to evaluate or describe._
+
+
+The columns that are prorated using split factor are highlighted in the data map.
+
+### Logic for Order fraction
+
+order\_fraction = 1/count(distinct itemid)
+
+    \* 1/count(distinct modelid given the itemid)
+    
+    \* 1/count(distinct bundle\_order\_itemid given the (itemid, modelid))
+    
+    \* 1/count(distinct groupid given the (itemid, modelid, bundle\_order\_itemid))
+
+_The image is a flowchart depicting an order process involving various product SKUs and a bundle deal. The central element is an "Order" box, from which arrows extend to three main components: "Normal SKU A," "Bundle Deal A," and "Normal SKU B." "Bundle Deal A" is highlighted in blue and specifies "Bundle_deal_itemid = 1."
+
+"Normal SKU A" and "Normal SKU B" are both red boxes, with "Itemid_modalid" values of "111_111" and "222_222," respectively. "Normal SKU B" appears twice, indicating it's part of the bundle.
+
+"Normal SKU C" is also a red box, with "Itemid_modalid = 222_333," and is connected to "Normal SKU B."
+
+The image conveys the concept of a bundle deal where a specific item (Itemid_modalid = 1) is included in an order, and multiple "Normal SKU" items are also part of the transaction. The use of different colors (red for individual SKUs, blue for the bundle) helps to visually distinguish the bundle from the regular items._
+
+
+|              |        |         |                         |         |                 |                                                              |
+| ------------ | ------ | ------- | ----------------------- | ------- | --------------- | ------------------------------------------------------------ |
+| ID           | itemid | modelid | bundle\_order\_itemid   | groupid | order\_fraction | Logic explanation for order\_fraction                        |
+| Normal SKU A | 111    | 111     | 0  (not part of bundle) | 0       | 0.5             | 1  /count(distinct itemid) in this order → 2 items   / count(discount modelid given itemid=111) →1 model  = 1/ 2/ 1 = 1/2 |
+| Normal SKU B | 222    | 222     | 0  (not part of bundle) | 0       | 0.125           | 1  / count (distinct item\_id) in this order → 2 items  / count (distinct modelid given itemid = 222)  → 2 models  / count distinct ( bundle\_order\_itemid given itemid =222  and modelid =222) → 2 bundel\_order\_itemid  = 1/2/2/2= 0.125 |
+| Bundle SKU B | 222    | 222     | 1  (part of bundle 1)   | 0       | 0.125           | 1  / count (distinct item\_id) in this order  → 2 items  / count (distinct modelid given itemid = 222)  → 2 models  / count distinct ( bundle\_order\_itemid given itemid =222 and modelid =222) → 2 bundel\_order\_itemid    = 1/2/2/2= 0.125 |
+| Bundle SKU C | 222    | 333     | 1  (part of bundle 1)   | 0       | 0.25            | 1  / count (distinct item\_id) in this order → 2 items  / count (distinct modelid given itemid = 222)  → 2 models  = 1/2/2 = 0.25 |
+
+### Logic for Split factor from order to order item
+
+Split factor for normal items
+
+split\_factor = amt\*order\_price / sum(amt\*order\_price) //for all items in order
+
+if sum(amt\*order\_price) == 0 then order\_fraction is used
+
+Split factor for bundled deal items
+
+Step 1 : find the split factor of the bundle within the order, treat the one bundle as one order item
+
+Step 2: find the bundle split faction which is  split\_factor for the item within in a bundle
+
+bundle\_split\_factor (split\_factor for the item within in a bundle )
+
+ = amt\*item\_price / sum(amt\*item\_price) //for items in bundle
+
+if sum(amt\*item\_price) == 0 then bundle\_order\_fraction is used
+
+bundle\_order\_fraction = 1/count(distinct itemid)//for all items in bundle
+
+    \* 1/count(distinct modelid given the itemid)
+
+Step 3: find the overall split factor of the bundle item
+
+Overall split\_factor for items in a bundle
+
+= split\_factor of the bundle within the order \* bundle\_split\_factor of the item within the bundle
+
+_The image is a flowchart or diagram illustrating order level information for a bundle and individual SKUs (Stock Keeping Units). It includes details such as:
+
+- **Order Level Information:**
+ - GMV (Gross Merchandise Value): 300
+ - ASF (Average Selling Factor): 60
+
+- **Bundle SKU A:**
+ - Bundle_deal_id: 1
+ - Amt: 1
+ - order_price: 50
+ - split_factor: 50/150 = 0.33
+ - GMV: 300 * 0.33 = 100
+ - ASF: 60 * 0.33 = 20
+
+- **Normal SKU A:**
+ - Itemid_modelid: 111_111
+ - Amt: 4
+ - order_price: 25
+ - split_factor: 25/4/150 = 0.67
+ - GMV: 300 * 0.67 = 200
+ - ASF: 60 * 0.67 = 40
+
+- **Normal SKU B:**
+ - Itemid_modelid: 222_222
+ - Amt: 3
+ - Item__
+
+
+|                                  |          |           |                         |                                                              |                                                              |                                                              |
+| -------------------------------- | -------- | --------- | ----------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| SKU                              | item\_id | model\_id | bundle\_order\_item\_id | split\_factor of the bundle within the order                 | Bundle\_split\_factor of the item within the bundle          | Overall split\_factor  ( sum up to 1 for all the items in the order) |
+| Normal SKU A                     | 111      | 111       | 0                       | = 4 \* 25 / (4\*25 + 1\* 50 )  = 100/ 150  = 0.67  → (split factor for normal SKU A) | 1  (normal item)                                             | =  1\* 0.67  = 0.67                                          |
+| Bundle SKU B (part of bundle A)  | 222      | 222       | 1                       | = 1 \* 50 / (4\*25 + 1\* 50 )  = 50/150  = 0.33  → split factor of the bundle A within the order | = 20\* 3 / (20\*3 + 20\*2 )    = 60 /100  = 0.6  → bundle\_split\_factor of bundle SKU B within bundle A | = 0.33 \* 0.6  = 0.2                                         |
+| Bundle SKU C  (part of bundle A) | 333      | 333       | 1                       | = 1 \* 50 / (4\*25 + 1\* 50 )  = 50/150  = 0.33  → split factor of the bundle SKU A within the order | = 20\* 2 / (20\*3 + 20\*2 )    = 40 /100  = 0.4  → bundle\_split\_factor of bundle SKU C within bundle A | = 0.33 \* 0.4  = 0.13                                        |
+
+#
+
+# Business Domain knowledge - Order
+
+This chapter will cover business domain knowledge that helps users better understand how the data is generated and should be used. For additional topics and errors in the knowledge guide, please reach out to the Data PM.
+
+## Order Core
+
+### Order Status
+
+Below displayed a list of order status and their description as well as the state machine diagram.
+
+The corresponding column name is order\_be\_status\_id and order\_be\_status
+
+|      |                   |                             |                                                              |
+| ---- | ----------------- | --------------------------- | ------------------------------------------------------------ |
+| id   | Status            | Terminal Status             | Description                                                  |
+| 0    | delete            |                             | Initial state when order is being created                    |
+| 1    | unpaid            |                             | State before order is paid (for COD, it will always be this state until payment is made)  COD orders can be identified using is\_cod\_order column |
+| 2    | paid              |                             | State will become paid from unpaid for Non-COD after payment is done or COD after goods is delivered and paid |
+| 3    | shipped           |                             | No longer in use                                             |
+| 4    | completed         |                             | Order is completed → next step is to go to escrow  This status is triggered when buyer click the received goods button or after a fixed amount of days of no action when buyer did not receive the goods |
+| 6    | invalid           | Yes                         | For COD, as long as it's not delivered state is changed to invalid (this can be caused by lost parcel or cancel)  For non-COD, only when cancel before payment |
+| 7    | cancel processing |                             | For non-COD ,user initiate cancel after payment and before delivered  For COD, user initiate cancel before delivered |
+| 8    | cancel completed  | Yes                         | Refund process is completed                                  |
+| 9    | return processing |                             | User initiated return and refund request after goods delivered, before return is completed    Note:This status and its associated transition will not exist for orders supporting [RR after order completion](https://www.google.com/url?q=https://docs.google.com/presentation/d/1Zxqg5PlG59IsE7fiW9dCi6cXqxfsiJOzjZbwIFCasAI/edit%23slide%3Did.g135a84e631f_0_520&sa=D&source=editors&ust=1757790484429136&usg=AOvVaw3bzk53bGmknAETSNiW_29u), please refer to section [order state machine](#h.clnjhm6u9o96) for more details |
+| 10   | return completed  |                             | After return is completed, check if escrow is needed, if need move to escrow, if not needed, this is the end state    Note:This status and its associated transition will not exist for orders supporting [RR after order completion](https://www.google.com/url?q=https://docs.google.com/presentation/d/1Zxqg5PlG59IsE7fiW9dCi6cXqxfsiJOzjZbwIFCasAI/edit%23slide%3Did.g135a84e631f_0_520&sa=D&source=editors&ust=1757790484430841&usg=AOvVaw2DRxlGbCmiWAbatSUDeNkj), please refer to section  [order state machine](#h.clnjhm6u9o96) for more details |
+| 11   | escrow paid       | No longer a terminal status | End state, escrow is paid out to seller    Note: Escrow\_paid is no longer terminal status for regions that enabled[RR after order completed](https://www.google.com/url?q=https://docs.google.com/presentation/d/1Zxqg5PlG59IsE7fiW9dCi6cXqxfsiJOzjZbwIFCasAI/edit%23slide%3Did.g135a84e631f_0_520&sa=D&source=editors&ust=1757790484432723&usg=AOvVaw2-IysQ1wpJ4jNIX1PS1BYO)feature. Please refer to the section below [Update in Terminal Status](#h.ndelfjmsmwqy) for more details about change in terminal status. |
+| 12   | escrow created    |                             | First status is escrow module, after item is completed or return completed |
+| 13   | escrow pending    |                             | This state is triggered when some issue with escrow cannot proceed (e.g. fraud and risk), manual intervention is required |
+| 14   | escrow verified   |                             | Escrow is verified and ready to be paid out                  |
+| 15   | escrow payout     |                             | Escrow is being paid to the seller → move to escrow paid after this stage |
+| 16   | cancel pending    |                             | A rare status where buyer cancelation need buyer approval (usually after cancel time and seller have already arranged shipping) |
+
+#### Current Order State Machine
+
+Note: Status RETURN\_PROCESSING , RETURN\_COMPLETED and its associated transition will not exist for orders supporting RR after order completion (return decoupled from order)
+
+Only for orders that support RR  after order completion.  the return status will be decoupled from order ext status, otherwise will remain the same as it is. User decouple\_return\_state in dwd\_order table to identify if the feature is enabled
+
+New Order State Machine is launched for all regions (return-related status and associated transactions are removed) → RR is decoupled from order for all new orders
+
+_The image is a flowchart titled "Order Ext Status," which provides a detailed overview of the various order extension statuses within the Shopee platform. It is divided into three main sections: "Return," "Cancellation," and "Escrow."
+
+- **Return Section:**
+ - **ORDER_EXT_RETURN_PROCESSING (9):** Indicates the process of handling returns.
+ - **ORDER_EXT_RETURN_COMPLETED (10):** Represents the completion of the return process.
+
+- **Cancellation Section:**
+ - **ORDER_EXT_CANCEL_PENDING (16):** Shows the pending cancellation status.
+ - **ORDER_EXT_INVALID (6):** Depicts an invalid order status.
+ - **ORDER_EXT_CANCEL_PROCESSING (7):** Illustrates the processing of cancellations.
+ - **ORDER_EXT_CANCEL_COMPLETED (8):** Represents the completion of the cancellation process.
+
+- **Escrow Section:**
+ - **ORDER_EXT_ESCROW_CREATED (12):** Indicates the creation of an escrow order.
+ - **ORDER_EXT_ESCROW_PENDING (13):** Shows the pending escrow status.
+ - **ORDER_EXT_
+
+
+For more information on the status transition, please refer to [Order State Machine (new)](https://www.google.com/url?q=https://confluence.shopee.io/pages/viewpage.action?pageId%3D774321111&sa=D&source=editors&ust=1757790484438895&usg=AOvVaw0RHIHj9YAYhraagJEgN_Mo)
+
+#### Order item status
+
+There is a set of order item status:
+
+   OITEM\_DELETE     = 0; (not in use)
+
+   OITEM\_UNRATED    = 1;
+
+   OITEM\_RATED      = 2; -> represent whether orderitem is rated or not
+
+   OITEM\_RETURNED   = 3;
+
+   OITEM\_RETURN\_RATED = 4; represent whether the returned item is rated or not
+
+   OITEM\_CANCEL     = 5;
+
+In-short orderitem has 3 status active(1,2) , returned (3,4) , canceled (5) . Order item status is independently maintained as order\_be\_status though there is validation of order-level status before changing the status of orderitem.  So the values of orderitem status will be within the permissible limit.
+
+For orders that allow RR after order completed (return decoupled from order):
+
+* the order\_be\_status will be escrow\_paid instead of return\_completed (removed from order state machine)
+* The order\_item\_status will be returned (OITEM\_RETURNED, OITEM\_RETURN\_RATED)
+
+Note: order\_be\_status is order-level and follows the order state machine. When the order is partially canceled/ returned, then it is possible for order\_be\_status (escrow\_paid) and order\_item\_status to be different.
+
+_The image is completely black and does not contain any discernible content, icons, or information._
+
+
+As shown in the example, the order is partially returned, and partially canceled and has one order item active. The order\_be\_status is escrow\_paid. Order\_be\_status will be canceled only when the order is fully canceled.
+
+_The image is completely black, indicating that it does not contain any visible content or information._
+
+
+Since return status are removed from order status, to look at detailed return status, you need to look at the return table [mp\_order.dwd\_return\_item\_all\_ent\_df\_\_reg\_s0\_live](#h.1fb3kjc6q8b4)
+
+#### Order status FE/BE relationship
+
+Order\_be\_status represents the order defined in the backend state machine while order\_fe\_status represents the status seen by users on the app (not the one seen by seller on seller center). The relationship between these two statuses can be represented by the following tables depending on whether the order is COD or non-COD:
+
+Non-COD orders
+
+|                       |                   |                       |                                                              |
+| --------------------- | ----------------- | --------------------- | ------------------------------------------------------------ |
+| order\_fe\_status\_id | order\_fe\_status | order\_be\_status\_id | order\_be\_status                                            |
+| 9                     | TO\_PAY           | 1                     | UNPAID                                                       |
+| 7                     | TO\_SHIP          | 2,16                  | PAID, CANCEL\_PENDING                                        |
+| 8                     | TO\_RECEIVE       | 2,9,10                | PAID, RETURN\_PROCESSING, RETURN\_COMPLETED                  |
+| 3                     | COMPLETED         | 4,10,11,12,13,14,15   | COMPLETED, RETURN\_COMPLETED, ESCROW\_PAID, ESCROW\_CREATED, ESCROW\_PENDING, ESCROW\_VERIFIED, ESCROW\_PAYOUT |
+| 4                     | CANCELED          | 6,7,8                 | INVALID, CANCEL\_PROCESSING, CANCEL\_COMPLETED               |
+
+COD orders (not applicable for BR)
+
+|                       |                   |                       |                                                              |
+| --------------------- | ----------------- | --------------------- | ------------------------------------------------------------ |
+| order\_fe\_status\_id | order\_fe\_status | order\_be\_status\_id | order\_be\_status                                            |
+| 9                     | TO\_PAY           | 1                     | UNPAID                                                       |
+| 7                     | TO\_SHIP          | 1,16                  | UNPAID, CANCEL\_PENDING                                      |
+| 8                     | TO\_RECEIVE       | 1,9,10                | UNPAID, RETURN\_PROCESSING, RETURN\_COMPLETED                |
+| 3                     | COMPLETED         | 4,10,11,12,13,14,15   | COMPLETED, RETURN\_COMPLETED, ESCROW\_PAID, ESCROW\_CREATED, ESCROW\_PENDING, ESCROW\_VERIFIED, ESCROW\_PAYOUT |
+| 4                     | CANCELLED         | 6,7,8                 | INVALID, CANCELLED\_PROCESSING, CANCELLED\_COMPLETED         |
+
+Reference: [https://confluence.shopee.io/pages/viewpage.action?pageId=1345692203](https://www.google.com/url?q=https://confluence.shopee.io/pages/viewpage.action?pageId%3D1345692203&sa=D&source=editors&ust=1757790484450266&usg=AOvVaw2l4E3iNldw-BiJL5sw1RmC)
+
+### Cancellation
+
+For buyer cancellation there are two types :
+
+1. checkout cancellation: This cancellation is instant.
+2. order cancellation before 3PL pickup done  (ie. when order is still in TO SHIP / before logistic\_pickup\_done).
+
+1. Instant: able do the cancellation instantly
+2. Non instant: cannot cancel directly, should wait for seller response (accept or reject)
+
+[https://confluence.shopee.io/display/SPCT/%5BMaster+PRD%5D+Buyer+Cancellation](https://www.google.com/url?q=https://confluence.shopee.io/display/SPCT/%255BMaster%2BPRD%255D%2BBuyer%2BCancellation&sa=D&source=editors&ust=1757790484451226&usg=AOvVaw26nJMNfBDRJ8OWzVKfC48w)
+
+Cancellations can be done by buyer, seller or system.
+
+For the full list of cancellation reasons, please refer to [https://confluence.shopee.io/display/SPCT/Shopee+Cancellation+Reason+Summary](https://www.google.com/url?q=https://confluence.shopee.io/display/SPCT/Shopee%2BCancellation%2BReason%2BSummary&sa=D&source=editors&ust=1757790484451658&usg=AOvVaw24Mxnu1awdqJb3Jh3faTGp)
+
+To identify who cancels the order, can look at cancel\_user\_id, which can be
+
+* user\_id of buyer
+* user\_id of seller
+* if the value equals to 0 or -1, it is canceled by system
+
+To identify cancellation reasons, you can refer to
+
+* Cancel reason : full list of cancel reason ( by seller order by system)
+* Buyer cancel reason: This is the cancel reason set by the buyer when he cancels the order when it is in the To Ship list
+
+## Return and Refund
+
+### Return Overview
+
+A buyer can initiate multiple return requests for one order. Only one request can be active at any given time and once the request is successful, not more subsequent request can be submitted
+
+_The image is completely black, indicating that it does not contain any visual information or content._
+
+
+For each request, a portion of the order items purchased can be returned (partial return) or all the items purchased will be returned to the seller (full return). For refund, the amount refunded can be classified as non-adjustable (the full amount as calculate based on various metrics) or adjustable (adjustable based on negotiation between buyer and seller, refund amount must be bigger than 0 and lesser than maximum refund amount)
+
+Note: for now the lowest granularity for return is order-item, partial quantity return for order-items are not allowed. ( if you purchase 10 same order-items, i.e. same table, the 10 tables must all be returned together, even if only 1 table is faulty)
+
+Partial quantity fulfillment/ return will be supported when the order-unit feature goes live.
+
+For more information, please refer to [Order-unit Support](#h.2csxydf3s6m7)
+
+#### Return Status
+
+Below displayed a list of return status and their description as well as the state machine diagram.
+
+The corresponding column name is return\_status\_id and return\_status in return table
+
+|      |                         |                                                              |                                                              |
+| ---- | ----------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| id   | Status                  | Terminal Status                                              | Description                                                  |
+| 1    | Return\_Requested       |                                                              |                                                              |
+| 2    | Return\_Accepted        |                                                              |                                                              |
+| 3    | Return\_Cancelled       | Yes                                                          | - Buyer cancel  - Agent cancel  - System cancel via non-receipt automation  - cronjob auto cancel when buyer does not ship the items by due date |
+| 4    | Return\_Judging         |                                                              | Happens when buyer/ seller raise dispute or system auto dispute |
+| 5    | Return\_Refund\_Paid    | Yes  ( provided return is accepted, so return must be both accepted and return\_refund\_paid then it is terminated) |                                                              |
+| 6    | Return\_Closed          | Yes                                                          |                                                              |
+| 7    | Return\_Processing      |                                                              |                                                              |
+| 8    | Return\_Seller\_Dispute |                                                              | Seller Raises dispute after buyer ships the items            |
+
+###
+
+#### Return State Machine
+
+_The image is a flowchart detailing the return and refund process within an e-commerce platform. It outlines various stages and actions taken by the buyer, seller, system, and agent, such as "Return_Requested," "Return_Judging," "Return_Accepted," and "Return_Closed." The flowchart includes decision points and actions like "system approve return," "buyer and seller agree to refund," and "agent agrees to proceed return." It also specifies different scenarios, such as "return and refund" or "refund only," and the conditions under which they apply. The chart is organized into modules like "Order Module," "Return_Processing," "Return_Logistics Module," and "Refund only module," with arrows indicating the flow of actions and decisions. The overall theme is to provide a clear, structured guide for handling returns and refunds in an online marketplace._
+
+
+#### Reverse Logistics
+
+Overview
+
+Return logistics is reverse logistics where items are returned from buyer back to seller. This is a different process as order logistics ( forward logistics) where items are sent from seller to buyer. In short, order logistics is linked to an order while reverse logistics is linked to a return.
+
+_The image is a simple flowchart or diagram with three labeled boxes connected by arrows. The boxes are labeled "Order," "Return," and "Reverse Logistics." The arrows indicate a sequential flow from "Order" to "Return" and then to "Reverse Logistics." The image is on a grid background.
+
+The intended message of the image is to illustrate the process flow from placing an order, to returning an item, and then to the handling of reverse logistics. This diagram is likely used to explain a return policy or process within a user manual, particularly for an e-commerce platform like Shopee._
+
+
+The entity relationship between return and reverse logistics is 1-to-1. If  the reverse logistics failed, the buyer needed to cancel the return and raise a new one. For one order, there could be multiple return requests raised but there can only be one active return.
+
+State Machine
+
+_The image is a flowchart detailing the logistics process for a return request in a system, likely related to Shopee. It outlines various stages and conditions for handling returns and logistics, including:
+
+1. **Return Processing (RT7/LG0)**: The initial stage where the return is processed.
+2. **Logistics Pending Arrange (LG12/LG1)**: This stage involves creating a logistics request.
+3. **Logistics Ready (LG9)**: This occurs after the user selects a shipping option and the system initiates logistics successfully.
+4. **Logistics Pickup Done (LG2)**: This stage is for non-integrated systems and occurs after the user enters shipping proof.
+5. **Logistics Pickup Failed (LG4)**: If the pickup fails.
+6. **Logistics Pickup Retry (LG3)**: If the pickup fails, a retry is attempted.
+7. **Logistics Pickup Done (LG2)**: For integrated systems, this stage is after successful logistics initiation.
+8. **Logistics Delivery Failed (LG6)**: If the delivery fails.
+9. **Logistics Delivery Done (LG5)**: If the delivery is successful.
+10. **Logistics Lost (LG11)**: If the item is lost.
+11. **Logistics Request Canceled (LG7)**: If the_
+
+
+For integrated channels, the terminal status is LG6, LG5 and LG11. For non-integrated channels, terminal status will be LG2 (pick-up done).
+
+### Refund
+
+There are four sources of refunds: checkout (overpaid), order (cancellation), OFG (cancellation), and return (finalized the request). All these data are stored in the same table.
+
+Refund creation
+
+|                                             |                          |
+| ------------------------------------------- | ------------------------ |
+| Event                                       | Remark                   |
+| Order full cancellation                     |                          |
+| Parcel cancellation (including lost parcel) | * on forder / ofg level  |
+| Return                                      | * Selected order items   |
+| Checkout underpaid cancellation             | * Only for bank transfer |
+| Checkout overpaid cancellation              | * Only for bank transfer |
+
+Refund state machine
+
+_The image is a flowchart depicting a process with various stages and transitions. It includes a start node labeled "0" and an end node labeled "paid". The stages in between are "created", "pending", "verified", "deleted", and "payout". Arrows indicate the direction of the process flow between these stages. The image also contains a watermark with a URL and an email address, indicating it is a copyrighted image. The overall theme of the image is a procedural workflow or state machine diagram._
+
+
+For more details about the transition between different status, please refer to [Refund State Machine](https://www.google.com/url?q=https://confluence.shopee.io/display/SPCT/OP1%2B-%2BOrder%2BRefund%23heading-3StateMachine&sa=D&source=editors&ust=1757790484465323&usg=AOvVaw2EGCkt-h_4wBkqjH868TCh)
+
+##
+
+## Order Fulfillment (Order logistics)
+
+### Order Fulfillment Overview
+
+There are different scenarios in the case of order fulfillment
+
+1. One order, one parcel → most common cases
+2. one order, multiple parcels
+3. Multiple orders, one parcel → group shipment which happens when multiple orders from different warehouse shop have stock in the same location, and shipped to the same buyer, hence can combine the orders into one parcel to save shipping fees
+4. Multiple orders, multiple parcels → combination of case 2 and case 3
+
+_The image is a flowchart that illustrates the order fulfillment process. It shows how orders are broken down into individual order items, then grouped into Order Fulfillment Groups (OFGs), which are further consolidated into group shipments. Each order item is associated with a specific quantity and type of product (e.g., "Red Apple x 3", "Green Apple x 2", "banana x 1"). The process involves multiple stages, including Order, OMS (Order Management System), OFG (Order Fulfillment Group), Forder (possibly a shipping or fulfillment order), and Parcel. The dotted line indicates the transition from OMS to OFG. The image effectively communicates the sequential steps and grouping involved in managing and shipping orders._
+
+
+Order Logistics State Machine
+
+The movement of the order logistics status is affected by order ext status as well as OFG fulfillment status. Reversely, order logistics status can also affect order ext status as well as OFG fulfillment status.
+
+_The image is a flowchart titled "Order Logistics Status" from a Shopee user manual. It outlines the various stages and transitions in the logistics process for an order. The flowchart includes states like "LOGISTICS_NOT_STARTED," "LOGISTICS_READY," "LOGISTICS_INVALID," "ORDER_CANCELLED," "LOGISTICS_REQUEST_CANCELLED," "LOGISTICS_PICKUP_DONE," "LOGISTICS_PICKUP_RETRY," "LOGISTICS_PICKUP_FAILED," "LOGISTICS_DELIVERY_FAILED," and "LOGISTICS_LOST." Arrows indicate the transitions between these states, with numbers in parentheses representing the order of events.
+
+A red box highlights a note stating, "Non-integrated channel seller update order has been shipped directly." This indicates a specific scenario where a seller who is not integrated with Shopee's logistics system manually updates the order status as shipped.
+
+The flowchart is useful for understanding the logistics process and identifying where issues might arise, such as "LOGISTICS_INVALID" or "LOGISTICS_PICKUP_FAILED." It also clarifies the handling of orders by non-integrated sellers._
+
+
+ [Order Logistics State Machine (New)#2OrderLogisticsStateMachine](https://www.google.com/url?q=https://confluence.shopee.io/pages/viewpage.action?pageId%3D774324484%23OrderLogisticsStateMachine(New)-2OrderLogisticsStateMachine&sa=D&source=editors&ust=1757790484467399&usg=AOvVaw3nDkRUApBAHWOTwiEVlStV)
+
+### Types of Shipping Channel
+
+3PL Data integrations
+
+* integrated channel
+
+* 3PL shares shipping data (e.g.ASF, tracking information) with Shopee
+
+* non-integrated channel
+
+* Seller/ shopee cannot track logistics information when choosing non-integrated channel
+
+3PL Payment Integration
+
+* Cashless Channel
+
+* 3PL allows for seller to pay shipping fee via Shopee
+
+* Non-cashless Channel
+
+* Seller pays 3PL shipping fee immediately after dropping of their product at the collection center
+
+_The image provides useful information by illustrating the difference between "Cashless Channel" and "Non-cashless Channel" in the context of Shopee's logistics and shipping processes.
+
+**Content and Theme:**
+The image is divided into two sections, each depicting a different logistics channel:
+
+1. **Cashless Channel:**
+ - **Description:** This channel allows the seller to pay for the shipping fee via Shopee online. Shopee acts as a middleman between the seller and the 3PL (Third-Party Logistics).
+ - **Flow Diagram:**
+ - The buyer initiates a purchase.
+ - Shopee offers a BPSF (Buyer Protection Service Fee) and a discount to the buyer.
+ - Shopee then provides a rebate and BPSF to the seller.
+ - The seller orders the ASF (Auxiliary Service Fee) to the 3PL.
+ - The 3PL processes the order.
+
+2. **Non-cashless Channel:**
+ - **Description:** This channel does not support Shopee paying the shipping fee on behalf of the seller. The seller needs to pay the cash in the courier on their own without Shopee's intervention.
+ - **Flow Diagram:**
+ - The buyer initiates a purchase.
+ - Shopee offers a BPSF and a discount to the buyer.
+ - Shopee then provides a rebate and BPSF to the seller.
+ - The seller directly_
+
+
+3PL Masking
+
+* Masked Channel
+
+* Masking of a channel aims to commoditise shipping as a service. A masked channel may contain more than one 3PL service provider. (i.e. masked channel is Express Channel, actual fulfillment channel can be J&T express, Ninja Van Express, Shopee Express)
+
+* Non-masked channel
+
+* Channel without masking logics, which is the actual fulfillment channel
+
+## _The image is a flowchart that illustrates the relationship between shipping options presented to a buyer during checkout and the corresponding shipping methods that Shopee can assign from the backend.
+
+On the left side, under the heading "What Buyer sees on Checkout Page - Shipping Section," there are three options: "Standard," "Express," and "Instant." These are the choices a buyer would see when selecting a shipping method.
+
+On the right side, under the heading "What Shopee can assign from backend," there are several shipping methods listed: "J&T Standard," "Shopee Express Standard," "Ninja Van Express," "Lalamove Express," and a placeholder for more options indicated by "3PL Channel Service..."
+
+The image uses dashed lines to connect each buyer-selected option to the corresponding backend shipping method, indicating that the backend can fulfill the specific type of shipping requested by the buyer.
+
+The intended message is to show the mapping between user-selected shipping options and the actual shipping services available to the seller through Shopee's backend system. This helps users understand that their chosen shipping method is supported by the platform._
+
+
+##
+
+Shipping channel related columns in order mart
+
+|                               |                                       |                   |                                                              |
+| ----------------------------- | ------------------------------------- | ----------------- | ------------------------------------------------------------ |
+| Column Name                   | Checkout Channel/ Fulfillment Channel | Masked/  Unmasked | Definition                                                   |
+| shipping\_channel\_id         | Checkout Channel                      | Masked            | Initial logistics channel select by buyer during checkout (include masked logistics channels) |
+| shipping\_carrier             | Checkout Channel                      | Masked            | The initial logistic provider name of the order selected by the buyer during checkout (can be masked) |
+| actual\_shipping\_carrier     | Checkout Channel                      | Masked            | The final logistic provider name of the order selected by the buyer during checkout(can be masked) |
+| fulfilment\_channel\_id       | Fulfillment Channel                   | Unmasked          | Actual fulfillment channel id for the order (unmasked)       |
+| fulfilment\_shipping\_carrier | Fulfillment Channel                   | Unmasked          | Actual fulfillment carrier name for the order (unmasked)     |
+
+##
+
+### Shipping fee, discount, and rebate overview
+
+|              |                                                              |
+| ------------ | ------------------------------------------------------------ |
+| Useful Links |                                                              |
+| 1.           | [Updated Document about Shipping Related Costs](https://www.google.com/url?q=https://docs.google.com/document/d/1juzqYWXhec9ZyWfOdn1ODvgJVPu57zA_dOfMf_ww3bE/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484476355&usg=AOvVaw10LBPYRvZPqmxyyTltEf4e) |
+| 2.           | [Visualization of Shipping Related Costs](https://www.google.com/url?q=https://docs.google.com/presentation/d/1pf04DA31RK_ySK0VPz-VTYhCsTUgLAQEy9FiAH8xzp8/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484476776&usg=AOvVaw1uxAKAyq4vIPMg7C5doi69) |
+
+---
+
+##
+
+From buyer perspective
+
+Interaction between buyer and shopee.
+
+|                                         |                                                              |
+| --------------------------------------- | ------------------------------------------------------------ |
+| Term                                    | Description                                                  |
+| Estimated Shipping Fee (ESF)            | The cost of shipping a buyer has to pay to shopee before any discounts provided by shopee/seller |
+| Shopee Defined Shipping Discount        | Shipping discounts provided by Shopee                        |
+| Seller Defined Shipping Discount        | Shipping discounts provided by seller                        |
+| Shopee Provided Discounted Shipping Fee | ESF - Shopee Defined Shipping Discount                       |
+| Seller Provided Discounted Shipping Fee | ESF - Seller Defined Shipping Discount                       |
+| Buyer Paid Shipping Fee (BPSF)          | Amount of shipping fee paid by buyer at checkout  BPSF = ESF - shipping discount by shopee / seller |
+| Actual Buyer Paid Shipping Fee (ABPSF)  | Amount of shipping fee actually paid by buyer after considering Return/Refund (RR) or Cancellation  Default value: BPSF |
+
+Note: the shipping discount concept is for the buyer while the shipping rebate concept is for the seller. There is no such thing as a shipping rebate for buyers.
+
+From seller perspective
+
+This process is the interaction between Seller and Shopee. In this process, Shopee would have received the actual shipping fee (ASF) amount from the 3PL that fulfilled the order.
+
+|                           |                                                              |
+| ------------------------- | ------------------------------------------------------------ |
+| Term                      | Description                                                  |
+| Actual Shipping Fee (ASF) | The actual shipping fee charged by 3PL for the order.  This value can be constantly updated by 3PL via SLS up until the order reaches escrow\_verified state.  Note: for Non-Integrated Channel: ASF = ESF as 3PL does not share ASF value with Shopee |
+| shipping rebate by Shopee | The rebate amount respect to shipping fee that shopee provided to seller |
+| shipping rebate by 3PL    | (ID Only)  The rebate amount respect to shipping fee that 3PL provided to seller |
+| Shipping rebate by Seller | This is the actual shipping cost that seller needs to bear after considering what ABPSF, what Shopee has reimbursed to seller for shipping promotion (shipping rebate by Shopee, and what 3PL rebate given to seller (applicable to ID orders only).    Shipping Rebate by Seller = ASF - ABPSF - Shipping Discount by 3PL - Shipping Rebate by Shopee |
+
+##
+
+### Order Processing Journey Key Timestamps (based on order admin)
+
+_The image is a Gantt chart titled "Order Processing Timeline," which provides a visual representation of the order processing stages and their respective timelines. It includes both estimated and actual dates for each stage, such as "Order Created," "Order Paid/COD_Confirmed," "Order Shipped Out," "Delivered," "Buyer Confirmed," and "Escrow Release Created." The chart is useful for understanding the sequence and duration of order processing steps, highlighting the difference between estimated and actual completion times. The visual format allows for quick comparison and assessment of the efficiency and timing of each phase._
+
+
+|                              |                                                              |                                                              |                                                              |
+| ---------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Order Processing Journey     | Column name                                                  | Definition                                                   | Mart Table                                                   |
+| Order Created                | create\_timestamp                                            | Timestamp of the order when it’s created                     | dwd\_order\_all\_ent/dwd\_order\_item\_all\_ent              |
+| Order Paid/ COD\_confirmed   | pay\_timestamp                                               | Timestamp of the order when it’s paid.  Please note that the actual paid time of the order for COD order is when its delivered | dwd\_order\_all\_ent/dwd\_order\_item\_all\_ent              |
+| shipping\_confirm\_timestamp | shipping confirm time of order at the point when order is created  for NON-cod → this shipping confirmed time is same as order pay\_time    for COD → this shipping confirmed time is roughly the same time as order create time | dwd\_ofo\_all\_ent/dwd\_order\_all\_ent/dwd\_order\_item\_all\_ent |                                                              |
+| Shipped out                  | ship\_by\_timestamp                                          | Deadline for the order to be shipped.  Estimated timestamps for 3PL to pick up the parcel | dwd\_ofo\_all\_ent/dwd\_order\_all\_ent/dwd\_order\_item\_all\_ent |
+| ship\_out\_timestamp         | Actual timestamp for 3PL to pick up. Timestamp when order logistics status is updated to LOGISTICS\_PICKUP\_DONE  This is the shipping start time | dwd\_ofo\_all\_ent                                           |                                                              |
+| Delivered                    | expected\_delivered\_timestamp                               | Estimated timestamps for logistics delivery done and order received by buyer | dwd\_ofo\_all\_ent                                           |
+| delivered\_timestamp         | Actual timestamps for logistics delivery done and order received by buyer.  This is the shipping end time | dwd\_ofo\_all\_ent                                           |                                                              |
+| Buyer Confirmed              | complete\_timestamp                                          | Actual timestamp of the order when it’s completed / accepted by the buyer after receiving all the parcels for the order.    When the buyer clicks the received goods button or after a fixed amount of days of no action. | dwd\_order\_all\_ent/dwd\_order\_item\_all\_ent              |
+| Escrow Release Created       | release\_timestamp                                           | Estimated timestamp when the order should already be completed and escrow started. | dwd\_order\_all\_ent/dwd\_order\_item\_all\_ent              |
+| complete\_timestamp          | Actual timestamp of when the order is completed and escrow\_started | dwd\_order\_all\_ent/dwd\_order\_item\_all\_ent              |                                                              |
+
+---
+
+#
+
+#
+
+## Settlement
+
+### Settlement Overview
+
+Settlement System answers the 3 questions for a Shopee marketplace transaction that requires money settlement with seller:
+
+* Whom to pay?
+* How much to pay?
+* How to pay?
+
+The marketplace transactions can be generalized as Escrow and Adjustment. In order to settle for these transactions, the Settlement System needs to integrate with a few upstream systems (source of txn) and downstream systems (payment facilitator).
+
+In 2022, the Order Accounting team migrated from the old STS to the new STS system. The STS module was built in Order Mart to help teams migrate their reports that relied on old STS tables. Moving forward, users can use Order Mart’s STS tables to get data on both old\* and new STS billing items and payouts.
+
+\*only billing items and payouts paid in old STS were brought over to Mart tables. This is because non-paid billing items and payouts at the point of migration should be treated as invalid as the pending billing items should have already been ‘synced’ to new STS.
+
+High-level illustration
+
+_The image is a flowchart that illustrates the transaction process within a system, likely related to e-commerce or digital payments. It is divided into three main sections: Upstream Systems, Settlement System, and Downstream Systems.
+
+1. **Upstream Systems**: This section includes three components:
+ - **Order System**: Receives and processes verified escrow transactions.
+ - **Warehouse systems, SVS systems etc.**: Handles auto deductions & compensations.
+ - **Adjustment Centre**: Manages manual adjustments.
+
+2. **Settlement System**: This is the central processing unit that:
+ - Maintains settlement accounts and balances.
+ - Generates statements.
+ - Creates payouts (customize payment details per business logics).
+ - Performs reconciliations.
+ - Keeps a ledger of accounts (future scope).
+
+3. **Downstream Systems**: This section involves payout facilitation:
+ - **Safeguard System**: Conducts de-dup check.
+ - **SPM**: Manages auto payouts.
+ - **Seller Wallet**: Receives auto payouts.
+ - **3PP**: Facilitates manual payouts (special handling only).
+
+The flowchart uses arrows to indicate the direction of data flow and updates, with "Payment result update" labels indicating the status of each_
+
+
+---
+
+### Key Entities and Actions
+
+Based on the high level illustration of STS architecture, these are the main entities, actions and processes in new STS.
+
+|                             |                                                              |
+| --------------------------- | ------------------------------------------------------------ |
+| Terminologies               | Explanations                                                 |
+| Billing Item (entity)       | Each time an upstream system passes a transaction to STS to do settlement, a billing item is created – each upstream transactions is represented by a billing item entity |
+| Settlement Account (entity) | Each shop has at least one settlement account in the settlement system, each settlement account maintains a settlement balance – this balance provides a snapshot view of how much Shopee owes the seller / seller owes Shopee through this account at the current moment. |
+| Settle (action)             | To settle a billing item means to successfully create a billing item and update the relevant settlement account balance. Billing items can also be created but not settled – in that case billing items will be put in “paused” status and settlement account balance wiIl not be updated. |
+| Payout (action)             | Refers to the action of executing the payment transaction, after a billing item has been settled.    There are mainly 2 types of payout:   * Auto Payout: means after settling the billing items, settlement system consolidates and passes the relevant payment info to downstream systems for payment execution * Manual Payout: means the payment execution is done manually offline. In this case, the settlement system does not interact with the downstream system, but only settles the billing items and keeps them for record purposes. |
+| Payout Process (process)    | Refers to how the payout is carried out.    For Auto Payout, the current use cases of payout process are:   * Immediate Auto Payout (Local): Billing items are to be paid immediately upon being settled. * Periodic Auto Payout: Billing items settled within the same period of time are to be grouped together before being paid together. The periods are pre-set such as one week or one month, and each period is called a billing cycle. Billing items which are settled in the same billing cycle are grouped together to form a statement. Normally after each billing cycle, the statement amount is to be paid. In exception cases such as the statement amount is negative, several statements can be accumulated and paid together. * Non-licensed Payout: A special use case for some CB sellers selling in SG region. It still belongs to Periodic Auto Payout, but with a variation in the sense that Ops teams play the role of SPM in the process.     For Manual Payout, the payout process is completely offline and STS has no visibility on it. |
+| Statement (entity)          | For periodic auto payout, each billing cycle by default produces one statement, which includes all the billing items settled during that billing cycle. The statement amount is the sum of all the associated billing items’ amount. A statement is not allowed to change anymore once it’s finalized at the end of the billing cycle.    Note that a statement represents the settlement result with the seller for the specific billing cycle without considering the payment transaction result. A statement is not to be associated with the payout process directly – for that we need a Payout entity. |
+| Payout (entity)             | Payout entity exists to provide the functionality of combining a few payment transactions together. More specifically:     * In periodic auto payout, although the statement entity already combines multiple billing items, the statement amount is to be paid via a payout entity. In the event that a statement amount is negative, several statements can be combined and paid together via one payout entity. |
+| Settlement Rule (process)   | A set of rules that control the lifecycle of billing item, statement and payout entities and customization to their attributes. Each settlement account must be tagged to one and only one settlement rule at the same time. |
+| Payout Channel              | Refers to the categorization of seller’s destination accounts which receive the payments. The current applicable payout channels are:   * (CB) PingPong – seller’s destination account is a PingPong (3PP) account. * (CB) LianLian * (CB) Payoneer * (CB) Tenpay * (Local) Seller Wallet * (Local) JKO Wallet |
+
+### Migration from old STS to new STS
+
+In 2022, the Order Accounting team migrated from the old STS to the new STS system leading to some differences in settlement entities. For the high level overview, please refer [here](https://www.google.com/url?q=https://docs.google.com/presentation/d/1lda9TETNS8cF7u-jXcumP1lqlc7r0ut-/edit%23slide%3Did.p5&sa=D&source=editors&ust=1757790484510576&usg=AOvVaw1mvOALJcZMwFhZo52qqEay).
+
+|                |                   |                                                              |
+| -------------- | ----------------- | ------------------------------------------------------------ |
+| New STS Entity | Old STS Entity    | Remarks                                                      |
+| Billing item   | Escrow/Adjustment | In the new STS system, both escrow and adjustments are referred to as billing items. However, there are 5 kinds of billing items a. Escrow  b. Adjustment  c. SVS order  d. ‘Negative Escrow’ due to Canceled Orders  e. R&R |
+| Statement      | Assemble          | In new STS, billing items will be compiled into a Statement rather than an Assemble. The settlement cycle will be based on the settlement rule configured |
+| Payout         | Payout            | There is no change in payout entity. In both old and new STS, a payout will be created as long as the assemble/statement is positive during each payout cycle which is defined by the settlement rule. |
+
+Old STS to Mart Mapping
+
+|                                                              |                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Old STS table                                                | Mart Table                                                   |
+| settlement\_system\_{cid}\_db\_\_settlement\_adjustment\_tab\_\_reg\_daily\_s0\_live  settlement\_system\_{cid}\_db\_\_settlement\_escrow\_tab\_\_reg\_daily\_s0\_live | dwd\_sts\_billing\_item\_all\_ent\_df\_\_reg\_live    (requires union between the old and the new system) |
+| settlement\_system\_{cid}\_db\_\_settlement\_adjustment\_batch\_tab\_\_reg\_daily\_s0\_live | dwd\_sts\_adjustment\_batch\_all\_ent\_df\_\_reg\_live       |
+| settlement\_system\_{cid}\_db\_\_payout\_record\_tab\_\_reg\_daily\_s0\_live | dwd\_sts\_payout\_all\_ent\_df\_\_reg\_live                  |
+| -N/A-                                                        | dim\_sts\_account\_\_reg\_live                               |
+| settlement\_system\_{cid}\_db\_\_settlement\_adjustment\_reason\_code\_tab\_\_{cid}\_daily\_s0\_live | dim\_sts\_adjustment\_reason\_\_reg\_live                    |
+| -N/A-                                                        | dim\_sts\_settlement\_rule\_snapshot\_\_reg\_live            |
+
+For exact 1 to 1 column mapping between old STS and mart tables, please refer to this [link](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/19D1u_Yo2DvZcJMQpwLpUmBV-WaFw472Ui8bpmxc0TGA/edit%23gid%3D54019581&sa=D&source=editors&ust=1757790484517837&usg=AOvVaw1axbxLMbmt2ofZ1daoKuPE).
+
+For more details on calculation logic behind STS mart, please refer to this [link](https://www.google.com/url?q=https://docs.google.com/spreadsheets/d/19D1u_Yo2DvZcJMQpwLpUmBV-WaFw472Ui8bpmxc0TGA/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484518077&usg=AOvVaw0dTN2wl0Id1yTuwmgeGljv).
+
+### Adjustment Center
+
+Adjustment Center is a centralized tool to create and store records for offline payment request cases. It provides capability for Ops users to create, track and approve manual adjustment relating to Marketplace and Digital Product orders (centralized visibility), and integrate with payout systems for auto-payout (ops efficiency).
+
+## Checkout
+
+GMV
+
+GMV is set when order is created or when a payment method is changed. Changing the payment method will change the buyer\_txn\_fee and hence affect the gmv collected from the buyer.
+
+GMV is calculated during checkout, it is stored in dwd\_order\_all\_ent / dwd\_order\_item\_all\_ent.
+
+for GMV formula breakdown, please refer to [Order Mart 3.0 Intro](https://www.google.com/url?q=https://docs.google.com/presentation/d/1myMAEKFkdaH7ghZBYE9CoxDrHCH-np0V1UWod0YDYGw/edit%23slide%3Did.ge147b9cbf0_0_294&sa=D&source=editors&ust=1757790484519321&usg=AOvVaw1P8ceB6twouHOwZSw-910V)
+
+Checkout Channels
+
+There are two fields to identify the platform where the checkout is performed:
+
+* checkout\_channel\_id
+
+* 0: App
+* 1: Mobile Web
+* 2: PC Web
+* 3: lite app (ID only)
+
+* is\_shopee\_lite\_checkout
+
+* This refers to shopee lite web
+* Take note this is different from shopee lite app, for shopee lite app please refer to checkout\_channel\_id = 3
+
+## Cart
+
+### Cart Overview
+
+In the user cart, cart items under the same shop are grouped together under one shop. Different models of the same items will be displayed separately in the cart page and be treated as different entities and the attributes will be model-level.
+
+Therefore in the DWD table, one row of data is per user/shop/item/model level, similar to the actual cart behavior.
+
+_The image is a screenshot from an online shopping platform, specifically Shopee, displaying a product listing for "DAISO KOREA X Kakao Friends Little...". The product is available in two variations: "Apeach Straw Cup" and "Lunch Box Apeach". The original price for each item is crossed out, and the discounted price is shown next to it. The image also includes a note in red text stating, "Same item, different models, stored separately in cart and in cart DB under one shop".
+
+The image serves as an example to illustrate a common issue where the same product appears multiple times in a user's cart or wishlist, potentially leading to confusion or accidental purchase of different models. The note aims to inform users that despite appearing as separate items, they are essentially the same product from the same shop. This is a practical tip for users to be aware of such scenarios while shopping online._
+
+
+### Add-on deal
+
+Promotion where buyer can get discount on certain items (sub items) if they meet some requirements on another group of items (main items)
+
+There are three types of add-on deal
+
+|                |                                                              |                                                              |
+| -------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Promotion Type | Description                                                  | FE UI                                                        |
+| Add-on deal    | Buy any 1 main item and get the sub item at a discounted price | _The image is a screenshot of a product listing on Shopee for a Samsung Galaxy S21 FE 5G smartphone. It includes details such as the phone's price ($815.00, discounted from $1,048.00), a 5-star rating, and a 1-year official warranty. The listing also shows available colors (Graphite, Lavender, Olive, White) and capacity (256GB). There are options to add the item to the cart or buy now, along with a shipping fee of $0.00 for orders over $45.00. |
+
+Additionally, the image displays "Add-on Deals" for various phone accessories, such as silicone covers and cases, with their respective prices and discounts. The layout is typical of an e-commerce product page, designed to provide comprehensive information for potential buyers._
+ |
+| Gift with purchase | Hit a minimum spend of main item to get the sub item for free | _The image is a screenshot of a product listing from an e-commerce platform. It displays a product called "NACIFIC Herb Retinol Mask Pack" with a price of $3.57. The product has a 5-star rating from 16 reviews and 33 units sold. The listing includes promotional details such as "10.10 Free Shipping Special" and "10% Cashback Vouchers." There are also options for "Add-On" and "Free Gift," with free shipping for orders over $15.00. The shipping origin is Korea, and there is a shipping fee range of $0.00 - $1.99. The quantity selector shows 467 pieces available. Additional buttons for "Add To Cart" and "Buy Now" are present, along with a "15 Days Return" policy and a "100% Authentic" badge.
+
+Below the main product listing, there is a section offering a "Spend $10.00 to get 1 gift(s)" deal, featuring images of additional NACIFIC products as gifts.
+
+The image is highly informative, providing comprehensive details about the product, its pricing, ratings, shipping options, and promotional offers._
+ |
+| Purchase with purchase | Hit a minimum spend or quantity of main item to get the sub item at a discounted price  (Note, PWP is a sunset package promo mechanism) | _The image is a screenshot of a product listing on the Shopee e-commerce platform. It displays a "Preferred" product, "Kai Xiao Zao Self Heating Claypot Rice Instant Rice," with a 13% discount. The original price is shown as $7.50 - $9.00, and the discounted price is $6.50 - $9.00. The product has a 5-star rating and has sold 9.5k units. It is highlighted as the "No. 3 Best Selling Rice."
+
+Below the main product, there are "Add-on Deals" featuring two other products: a pack of instant noodles priced at $1.90 and a pack of instant soup priced at $1.70. The total cost of these add-ons is $8.49, with a savings of $2.61.
+
+The image provides detailed information about the product, including its price, ratings, and additional deals, which is useful for potential buyers looking to purchase instant rice and related add-ons._
+ |
+
+The validity of sub-items depends on main items, sub-items can only enjoy discounted prices when main items in the same add-on-deal meet the deal requirements. Therefore when main items becomes invalid→ sub item becomes invalid
+
+### Cart FE status of valid / invalid
+
+For cart, there is a FE status of valid/invalid for cart items. When the cart items are invalid (grayed out), users are unable to checkout these items. Do take note that the invalid items will stay in the user cart (the records will remain in cart DB) as long as the user doesn't delete.  This FE status of valid/ invalid is computed through API every time a user opens their cart.
+
+_The image is a screenshot of a shopping cart interface from an e-commerce platform, likely Shopee, showing a user's selected items and their prices. The cart contains two items: a "DAISO KOREA X Kakao Friends Littl..." Apeach Straw Cup and a "DAISO KOREA X Kakao Friends Littl..." Lunch Box Apeach. The original prices are crossed out, and the discounted prices are displayed. The user has applied a 5% discount for purchasing five items. The total amount in the cart is $0.00, indicating no items have been checked out. The interface also shows options to select vouchers, filter items, and check out. The image highlights "valid cart items" in red, suggesting a focus on ensuring the cart contains eligible products for purchase._
+             _The image is a screenshot from the Shopee app, showing a section titled "Invalid items" within a filter or sorting function. It highlights various products with labels indicating their status: "Unlisted," "Deleted," and "Sold Out." The image also includes a note pointing to the "Invalid items" filter, stating "Conditions cart items to be invalid." The theme of the image is to inform users about the criteria or conditions that lead to certain products being marked as invalid within the shopping cart, likely for reasons such as unavailability or removal from sale. The key elements include the visual indicators for product status and the explanatory text._
+
+
+1. Valid cart items                                                       2) Invalid cart items (grayed out)
+
+This status is not recorded in DB and can only be deduced.There are a few possible scenarios for the FE status of cart items to become invalid. We have computed the logic to simulate these conditions
+
+Cart Items Invalid Conditions
+
+There are a few possible scenarios for the FE status of cart items to become invalid. We have simulated each of these scenarios.
+
+You can look at cart\_item\_fe\_status for whether the item is FE valid or not. To understand the reasons for the item to become invalid (grayed out) on the frontend, please refer to the table below.
+
+|                          |                                                 |                                                              |                                                              |
+| ------------------------ | ----------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+|                          | Conditions for invalid cart items               | Definition                                                   | Column to look at from  dwd\_cart\_model\_all\_ent\_snapshot\_df\_\_{reg/xx}\_live |
+| 1                        | Item is sold out                                | All models of the item has no stock    Note : When only one model is sold out, and there still exists other models under this item with stock, this item is still valid, users need to select another variation.     _The image is a screenshot of a shopping cart page from the Shopee app. It displays various offers and discounts, such as a voucher for shipping discounts and a 5% off bundle offer. The main focus is on a specific product, the "Fabric Foldable Storage Box Oxford...", which is highlighted with a red box and arrow. A message next to the product indicates that the selected variation is sold out and prompts the user to "select another variation." The image is useful as it illustrates a common issue users might face when shopping online: selecting an unavailable product variation. It also shows the interface elements like the shopping cart, product listing, and options to edit or add more._ |                                                              |
+| item\_stock =0 → invalid |                                                 |                                                              |                                                              |
+| 2                        | Item status is not normal                       | Item status is not normal                                    | item\_status\_id !=1 → invalid                               |
+| 3                        | Item is censored                                | Item is censored                                             | is\_censored\_item = 1→ invalid                              |
+| 4                        | Shop status is abnormal                         | Shop status is abnormal                                      | shop\_status\_id !=1 → invalid                               |
+| 5                        | Seller is inactive                              | When seller account is inactive for more than 7 days         | is\_seller\_inactive = 1 → invalid                           |
+| 6                        | Seller is frozen                                | When seller account is frozen                                | seller\_status\_id !=1 → invalid                             |
+| 7                        | User is blocked by seller                       | User is blocked by seller                                    | is\_user\_blocked\_by\_seller =1 → invalid                   |
+| 8                        | Add-on deal is invalid                          | -  For the same add-on deal group in cart,  when all the main items are out of stock, status of sub items become invalid    - Add-on deal is expired, status of sub items become invalid    - When Add-on deal is ongoing but the items are removed from the promotions, the promo price is no longer valid, status of the add-on deal sub-item becomes invalid | is\_add\_on\_deal\_invalid =1 → invalid                      |
+| 9                        | Items that are permanently deleted from listing | Items that currently have status = 0(deleted) or 5 (admin deleted confirmed) for more than 90 days will be deleted from dim\_item/dim\_model,  we are only joining with dim\_model, therefore the deleted ones we cannot join to find the attributes    Note: to understand more about item deletion project, please refer to [Item Cleaning Project Plan.pptx](https://www.google.com/url?q=https://docs.google.com/presentation/d/1GHTuytjmvl0KDO4wtGX1ov8oNh-0uS4O/edit%23slide%3Did.p1&sa=D&source=editors&ust=1757790484533595&usg=AOvVaw2b-pf1oUvB5VSa3ni7jYIp) | is\_item\_permanently\_deleted = 1 → invalid                 |
+
+## Cross-Domain Project Updates
+
+### Order-unit Support [new]
+
+#### Feature Overview
+
+Currently, Shopee doesn't support different quantities of the same OrderItem to be split and shipped out separately. When  there are >1 quantities for the same order-item, it is impossible for different physical units to have different status when it comes to fulfillment and return.
+
+* In the case of order fulfillment, currently shopee supports parcels split by order-item but not by quantity ( physical units).
+
+_The image is a flowchart illustrating the process of fulfilling an order. It shows an "Order" box containing items "Lipstick x2" and "Mask x10". Two arrows lead from the order to two separate "Parcel 1" and "Parcel 2" boxes. The arrows are labeled "Ship from WH1" and "Ship from WH2", indicating that the items are shipped from two different warehouses. The image includes a green checkmark with the word "Supported" below it, suggesting that this shipping method is allowed or recommended. The overall theme is about order fulfillment and shipping logistics._
+_The image is a flowchart illustrating an order process for shipping diapers. It shows an "Order" containing "Diaper x5". This order is then divided into two parcels: "Parcel 1" with "Diaper x3" and "Parcel 2" with "Diaper x2". An arrow labeled "Parcel oversize" connects the order to both parcels, indicating that the order is being split into two oversized parcels. A red "X" with the label "Not Supported" is prominently displayed below the parcels, indicating that shipping multiple oversized parcels from a single order is not supported by the service. The image conveys the policy restriction regarding the shipment of multiple large items._
+
+
+* For the same bundles (ie.bundle deal, vsku), currently they need to be fulfilled together
+
+* One bundle deal (may consists of multiple bundle order items)  is considered same order item → cannot split bundle for fulfillment ([an example of item applicable for bundle deal](https://www.google.com/url?q=https://shopee.sg/product/160419520/21267959934&sa=D&source=editors&ust=1757790484535869&usg=AOvVaw3FWgau5cg5vS8XRiFbf7nr))
+* VSKU is sold as single order item, but can consist of multiple source SKUs→ cannot split VSKU for fulfillment ( [an example of Virtual SKU](https://www.google.com/url?q=https://shopee.sg/product/162285147/10533077300&sa=D&source=editors&ust=1757790484536183&usg=AOvVaw1bKNinr7ydsPQzqcWOWwDp) )
+* Notes: VSKU is considered as a normal listing item - MPSKU from buyer perspective. This is different from bundle deals where buyers only see the listing items, the bundle is only formed at checkout with a dummy item\_id.
+
+_The image is a visual guide from the Shopee user manual that explains the difference between "Bundle Deal" and "VSKU" (Virtual Stock Keeping Unit) in terms of order fulfillment. It highlights that both are sold as single items but are made up of multiple physical SKUs (parent SKUs) stored in different warehouse locations.
+
+The image is divided into two sections:
+
+1. **Bundle Deal:**
+ - Shows an order for a "Get 4 for 3 Bundle Deal" consisting of "DiaperA x2" and "DiaperB x2".
+ - Illustrates that these items are packaged into two parcels ("Parcel 1" and "Parcel 2").
+ - Indicates "Parcel oversize" and marks it with a red "X" and "Not Supported", suggesting that this type of order is not supported by the system.
+
+2. **VSKU:**
+ - Shows an order for a "Travel Pack VSKU" consisting of "Shampoo x1" and "Body Wash x1".
+ - Illustrates that these items are packaged into two parcels ("Parcel 1" and "Parcel 2").
+ - Includes a note "Stored in diff WH, or Shampoo on back order" and marks it with a red "X" and "Not Supported", indicating this type of order is also not supported.
+
+The key elements include:_
+
+
+In summary, Shopee doesn't support OrderItem to be split and shipped out separately. In order to support this, the order team is going to create a new data structure to present the status of quantities inside one item. In the future, this will allow sellers to fulfill a single OrderItem into several parcels to be shipped out to buyer and from buyer side, they would be able to request return / cancel partial quantities within one OrderItem.
+
+This feature is expected to go live on 8/14 →Update:  release delayed to 9/20
+
+Two new system entities will be introduced to support this project :LineItem and BaseSkuItem.
+
+_The image is completely black and does not provide any visual information._
+
+
+MPSKU: represents the sales entity of the item. Owned by a Shop. 1 MPSKU is 1 listing item, item prices are set on the MPSKU level.
+
+MTSKU: represents the physical entity of the item in the supply chain. Owned by a Merchant. Stocks are tracked on this entity.
+
+To understand more about this feature, please refer to [[External Team] Order Unit Product Proposal](https://www.google.com/url?q=https://docs.google.com/presentation/d/1DK3SmsnuloaxvD-PnkE27cBT1xkTbgXYr7YBQUw16BE/edit%23slide%3Did.g18d872d3231_1_121&sa=D&source=editors&ust=1757790484537940&usg=AOvVaw15wWp0gca1JDUEMUq-AIuk)
+
+#### Data Impact
+
+In terms of data, two new entities will be added: LineItem and BaseSkuItem.
+
+Lineitem
+
+* Represents one or more quantities of the MPSKU selected for purchase by the buyer in an Order.
+* It is equivalent to any of these existing entities:
+
+* An OrderItem, except OrderItems that represents a bundle in a bundle deal promotion.
+* A BundleOrderItem that makes up a bundle deal.
+
+* In Phase 1, the OrderItem entity will be maintained. A line\_item\_id will be assigned to each LineItem-equivalent entity (ie. OrderItem / BundleOrderItem that makes up a bundle) → which is same as the current granularity for dwd\_order\_item table
+
+BaseSKUItem
+
+* Represents one or more quantities of order units (SKUs that are not made up of other SKUs).
+* BaseSKUItem contains quantities of its units for each unit status (Active, CancelRequested, Canceled, ReturnRequested, Returned). An order unit must be in exactly one of the 5 statuses at any time.
+* Apart from VSKU Item, the relationship between lineItem and BaseSKUItem is one-to-one
+
+* Order unit status definition
+
+_The image is a state machine diagram and a table that provides detailed information about the "OrderUnit" state transitions within the Shopee system. The state machine diagram illustrates the possible transitions between five states: Active, Cancel Requested, Cancelled, Return Requested, and Returned. Each state is represented by a rectangle, and arrows indicate the direction of transitions.
+
+The table to the right lists the states numerically (1-5) and provides definitions for each state. For example:
+
+1. Active: Initial state set on creation.
+2. Cancel Requested: Buyer has requested to cancel this OrderUnit; pending Seller/Shopee approval.
+3. Cancelled: OrderUnit has been cancelled.
+4. Return Requested: This OrderUnit is part of an ongoing return request (not yet closed, cancelled or accepted).
+5. Returned: This OrderUnit is part of a Return that has been accepted.
+
+The note at the top clarifies that "OrderUnit is not an actual entity" and that the state machine shows how quantities in BaseSKUItem can transition from one state to another.
+
+The image conveys the process and rules for managing OrderUnits in terms of their status and the actions that can lead to changes in their state. This is valuable information for users who need to understand how to handle and track order units within the Shopee platform._
+
+
+* The quantities of each status under the same BaseSKUItem will change with units status change
+
+_The image is completely black and does not contain any discernible content, icons, or information._
+
+
+There are 3 cases in terms of data structure: Normal Order Item, Bundle deal and VSKU
+
+* Normal Order item
+
+* One line item is equivalent to one order item → NO CHANGE for current orderitem users
+* One line item consists of one baseSkuItem
+
+_The image is a comparison diagram illustrating the "Current Design" versus "Proposed Design - Phase 1" for a "Normal Item" in a system, likely related to e-commerce or order management.
+
+**Content Description:**
+
+- **Current Design:**
+ - **Order:** id: 5678
+ - **Order Item:** id: 1234, item id: 123, quantity: 2, price: $10, status: unrated
+
+- **Proposed Design - Phase 1:**
+ - **Order:** id: 5678
+ - **Order Item:** id: 1234, item id: 123, quantity: 2, price: $10, status: unrated, line_item_id: 12340
+ - **Base SKU Item:** idx: 0, active qty: 1, cancel_requested qty: 0, cancelled qty: 1, return_requested qty: 0, returned qty: 0
+
+**Key Elements:**
+
+- **Comparison Structure:** The image uses two columns to compare the current design with the proposed design.
+- **Labels:** The top of each column is labeled with "Current Design" and "Proposed Design - Phase 1."
+- **Highlighted Changes:**
+ -_
+
+
+* Bundle deal
+
+* One line item is equivalent to single bundle order item (currently one order item is one bundle, single bundle order items in the bundle are stored as extinfo within the order item)
+* One line item consists of one baseSkuItem
+* In order mart, we have already split the bundle deal into individual bundle order items → NO CHANGE for current bundle order item users
+
+_The image is completely black and does not contain any discernible content or information._
+
+
+* VSKU
+
+* One line item is equivalent to one order item for virtual SKU
+* Line-item will contain more than 1 BaseSKUItem only for VSKU items.
+* Base\_sku\_item\_idx  that represent each parent SKU will be added under the existing OrderItem entity.
+
+_The image is a comparison diagram illustrating the "Current Design" versus the "Proposed Design - Phase 1" for a "Virtual SKU" system. It features two main sections:
+
+1. **Current Design**:
+ - Contains an "Order" with ID 5678.
+ - An "Order Item" with ID 1234, item ID 120, quantity 1, price $10, and status "unrated".
+ - Two "Component SKU" items, each with a different "mtsku item id" (123 and 124), and different quantities (2 and 1 respectively).
+
+2. **Proposed Design - Phase 1**:
+ - Also features an "Order" with ID 5678.
+ - An "Order Item" with ID 1234, item ID 120, quantity 1, price $10, and status "unrated".
+ - A "line_item_id" (12340) linking the Order Item to the Order.
+ - Two "Component SKU" items, each with a different "mtsku item id" (123 and 124), and different quantities (2 and 1 respectively).
+ - Two "Base SKU Item" components, each representing a "Component SKU". The first Base SKU Item shows "active qty:_
+
+
+#### Changes to order mart
+
+##### Order Core
+
+mp\_order.dwd\_order\_all\_ent
+
+1. is\_order\_unit\_enabled flag will be added for identifying orders that enable order-unit project
+
+dwd\_order\_item\_all\_ent
+
+1. line\_item\_id will be added.
+
+1. OrderItem entity is still maintained in Phase 1, your queries won’t be affected by the change, and can continue to perform order-item level analysis. (primary keys for order item tables stays the same)
+2. A line\_item\_id will be assigned to each LineItem-equivalent entity (OrderItem / BundleOrderItem which is the current granularity of dwd\_order\_item table)
+
+2. Base SKU item info (base\_sku\_items\_list) will be added.
+
+1. For non-vsku items, since one line-item relates to one baseSkuItem. Break down of baseSKUItem units quantity in each status will be added into dwd\_order\_item (5 new columns for active\_qty, cancel\_requested\_qty, cancelled\_qty, return\_requested\_qty, returned\_qty)
+
+2. For VSKU items, Line-item will contain more than 1 BaseSKUItem
+
+1. In dwd\_order\_item, base\_sku\_items\_list info will be kept as array struct, active\_qty, cancel\_requested\_qty, cancelled\_qty, return\_requested\_qty, returned\_qty will be null for VSKU
+2. In dwd\_order\_item\_vsku\_all\_ent\_df, we have broken into baseSKUItem level (MTSKU) already, therefore breakdown of each baseSKUItem units quantity in each status will be added to this table (5 new columns for active\_qty, cancel\_requested\_qty, cancelled\_qty, return\_requested\_qty, returned\_qty)
+
+3. Definition of order item status will change
+
+1. Previously all the quantities of the same order item had the same status. Now different quantities of the same order-item can have different status.
+2. Order Item status will be determined by determining the highest priority status (with qty > 0) across all BaseSKUItems in that Order Item
+3. Aggregation priority: RETURN\_REQUESTED > CANCEL\_REQUESTED > ACTIVE > RETURNED > CANCELLED
+4. Mapping from aggregated Order Units  status to Order Item status is as follows:
+
+|                              |           |               |
+| ---------------------------- | --------- | ------------- |
+| Aggregated Order Unit Status | is\_rated | OITEM Status  |
+| RETURN\_REQUESTED /RETURNED  | True      | RETURN\_RATED |
+| RETURN\_REQUESTED  /RETURNED | False     | RETURNED      |
+| ACTIVE / CANCEL\_REQUESTED   | True      | RATED         |
+| ACTIVE / CANCEL\_REQUESTED   | False     | UNRATED       |
+| CANCELED                     | Any       | CANCELED      |
+
+                   _The image is completely black, indicating that it does not contain any visual information or content._
+
+
+5. Following that logic, these are the new definitions of Order Item status
+
+|               |                                                              |                                                              |
+| ------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| OITEM Status  | Current Definition                                           | New Definition                                               |
+| UNRATED       | item is not rated nor canceled, and not part of an ongoing/accepted return | item is not rated, and not all units of the item are canceled / accepted return, and none of the units are part of an ongoing return |
+| RATED         | item is rated and not canceled, and not part of an ongoing/accepted return | item is rated, and not all units of the item are canceled / accepted return, and none of the units are part of an ongoing return |
+| RETURNED      | item is not rated, and is part of an ongoing/accepted return | item is not rated, and at least 1 unit is part of an ongoing return, or all of the non-cancelled units are part of an accepted return |
+| RETURN\_RATED | item is rated, and is part of an ongoing/accepted return     | item is rated, and at least 1 unit is part of an ongoing return, or all of the non-cancelled units are part of an accepted return |
+| CANCELED      | item is canceled                                             | item is canceled                                             |
+
+6. Definition of is\_returned\_item which filters for order\_item\_status in ('OITEM\_RETURNED','OITEM\_RETURN\_RATED') will change because of change in order item status
+
+4. Monetary components gross and net columns alignment
+
+1. Monetary components will still be maintained at order-item level. Can continue to use the fees gross and net columns
+2. Do take note that order-item level net columns (updated monetary components after RR/cancellations) will take account partial qty cancellation/ RR  while previously all qty of the order-item needs to canceled/ returned together
+
+dwd\_order\_item\_vsku\_all\_ent\_df
+
+This is a dedicated table for VSKU. One VSKU is considered one order item therefore one line item.
+
+For VSKU items, one Line-item will contain more than 1 BaseSKUItem. We break it down into BaseSKUItem levels for this table. → the current granularity of this table won’t change since it is already MTSKU (BaseSKUItem) level
+
+1. line\_item\_id and base\_sku\_item\_idx will be added. The primary keys for this table will not change
+2. Break down of order unit quantities in each status for each BaseSKUItem will provided (5 new columns for active\_qty, cancel\_requested\_qty, cancelled\_qty, return\_requested\_qty, returned\_qty)
+
+##### Order Fulfillment
+
+Context
+
+* Now can split the same OrderItem/LineItem with multiple quantities into different parcels
+* Now can split LineItems within the same bundle deal / Add on Deal / PWP / PWG into different parcels
+* Now can split VSKU components to different parcels
+
+* eg. if VSKU A = 1B + 2C, and buyer purchases 3 \* VSKU A (= 3B + 6C)
+* split 1B + 1C into a parcel and 2B + 5C into another parcel → this is acceptable
+
+dwd\_ofg\_all\_ent
+
+1. units\_info list will be added to extinfo for each OFG entry to store reference to the baseSKUItem, for backward compatibility, OFG will still keep items\_info list.
+2. quantity\_indexes will be added which will store list of unit indices [start\_index, quantity] of the BaseSKUItem in the OFG
+3. is\_order\_unit\_enabled will be added
+
+To understand more about the the logic for units\_info and quantity\_indexes, please refer to
+
+[OF Core Order Unit](https://www.google.com/url?q=https://confluence.shopee.io/display/SPCT/%255BDesign%255D%2BOF%2BCore%2BOrder%2BUnit&sa=D&source=editors&ust=1757790484555506&usg=AOvVaw0TtkL47A-YXzDH0HQmQ6v3)
+
+##### Return
+
+Context
+
+* Return side will be able to support return for physical SKUs within bundle deal/virtual SKU, or multiple quantities of the same order item in case of order split by quantity
+* Will not support multiple RR request per order
+* Will not support selecting custom quantity of an item in an RR request (must return all non-cancelled quantity for the selected item) → Update: There will be a new feature [Allow Partial Quantity RR](https://www.google.com/url?q=https://confluence.shopee.io/pages/viewpage.action?pageId%3D1855466849&sa=D&source=editors&ust=1757790484556273&usg=AOvVaw0cXmRbv_k7kL67YDyaZcuv) that allows buyer to adjust qty in RR request that is expected to go live in Q4
+
+dwd\_return\_item\_all\_ent\_df
+
+1. Column line\_item\_id will be added to this table
+2. is\_order\_unit\_enabled will be added
+3. return\_line\_info will be added into this table. It will have 3 components
+
+1. base\_sku\_items: index and return quantities of BaseSKUItems
+2. bundle deal related info
+3. line item level monetary fields that will be deducted from orders and returned to buyers or sellers
+
+#### References
+
+* [[External Team] Order Unit Product Proposal](https://www.google.com/url?q=https://docs.google.com/presentation/d/1DK3SmsnuloaxvD-PnkE27cBT1xkTbgXYr7YBQUw16BE/edit%23slide%3Did.g18d872d3231_1_121&sa=D&source=editors&ust=1757790484557395&usg=AOvVaw1OyhKZQr7lZPVQ0EzZLAl9)
+* [Order-unit Phase 1 Master PRD](https://www.google.com/url?q=https://confluence.shopee.io/display/SPCT/%255BPRD%255D%2BOrder%2BUnit%2BPhase%2B1&sa=D&source=editors&ust=1757790484557540&usg=AOvVaw3ykktsRf3VXOapItpAFesA)
+* [Order-unit Support - Return PRD](https://www.google.com/url?q=https://confluence.shopee.io/display/SPCT/%255B2023-Q1%255D%2BOrder%2BUnit%2BSupport&sa=D&source=editors&ust=1757790484557686&usg=AOvVaw0lkCoPlsQpYalBntFnsQZk)
+* [ODO Order-unit Phase 1 TD](https://www.google.com/url?q=https://confluence.shopee.io/display/SPCT/%255BODO%255D%2B%255BTD%255D%2BOrder%2BUnit%2BPhase%2B1&sa=D&source=editors&ust=1757790484557825&usg=AOvVaw1S9wP1D3MH0AJkeU2rmuDm)
+* [Order Mart Order-Unit Phase 1 TD](https://www.google.com/url?q=https://confluence.shopee.io/display/SDE/%255BTD%255D%2B%255BOrder%2BCore%255D%2BOrder%2BUnit%253A%2BPhase%2B1&sa=D&source=editors&ust=1757790484557978&usg=AOvVaw3AojuLHp4ZNBmJ1IldHqp3)
+
+# Business Domain knowledge - Others
+
+## Vouchers
+
+Vouchers are used by buyers to offset cost or gain coin cashbacks of the purchase. The vouchers are applied during checkout. Buyer’s voucher selection allowance per checkout to 1 or 2 Platform voucher, and 1 Shop voucher per shop in checkout (in short, "1+N" or "2+N")
+
+* Shop voucher → Vouchers configured as 'Seller vouchers' on Voucher Admin or seller-created from Seller Centre
+
+* Only discount / coin cashback reward types
+
+* Platform voucher → Vouchers configured as 'Shopee vouchers' on Voucher Admin
+
+* Does NOT include DP, Offline, Now vouchers
+* Includes discount / coin cashback and free shipping (=fsv) reward types
+* For 2+N selection can be only 1FSV + 1Discount/Coin
+
+_The image is a flowchart or diagram that outlines the impact of various types of vouchers and discounts on Shopee's costs and buyer utility. It is divided into two main sections:
+
+1. **Left Section (Per Checkout):**
+ - **(Shopee)**: Represents the platform's costs.
+ - **(Shopee OR Seller)**: Represents the split of costs between Shopee and the seller.
+ - **(Per checkout)**: Indicates that the costs are calculated per transaction.
+
+2. **Right Section (Voucher Types):**
+ - **(1 FSV + 1 Discount / Coin Cashback)**: Represents a specific type of voucher offering a fixed sum voucher (FSV) plus a discount or coin cashback.
+ - **(Disc/Cashback)**: Represents general discount or cashback vouchers.
+ - **(Any type - FSV/Disc/Cashback)**: Represents any other type of voucher that offers a fixed sum voucher (FSV), discount, or cashback.
+
+3. **Bottom Section (Effects):**
+ - **--**: No specific effect mentioned.
+ - **Cut down on costs from (Shopee) voucher use**: Indicates a reduction in costs for Shopee due to voucher usage.
+ - **High number of complaints and significant order drop**: Suggests a negative impact, such as_
+
+
+Checkout UI
+
+_The image contains three screenshots from the Shopee app, illustrating the process of applying vouchers during checkout.
+
+1. **Checkout Screen (A)**:
+ - Displays the delivery address and item details (Watsons Shop, iphone casing travel bag handbag Luggag...).
+ - Shows a "Shop Voucher" with "+1000 Coins" applied.
+ - Displays the shipping option and the total amount before vouchers (Rp800.000).
+ - Shows the sub-total after applying the voucher (Rp660.000).
+
+2. **Shopping Cart Screen (B)**:
+ - Shows the item in the cart with an applied voucher of "Rp100.000 off".
+ - Lists other available vouchers, including "Free shipping" and various discount offers.
+
+3. **Select Platform Voucher Screen (C)**:
+ - Displays a list of available platform vouchers, such as "GRATIS ONGKIR" (Free Shipping) and various cashback offers.
+ - Allows users to select and apply these vouchers.
+
+The image effectively demonstrates how to use and apply vouchers in the Shopee app, providing a clear visual guide for users._
+
+
+New UI allows users to select on shop vouchers for each order and up to two platform vouchers (1FSV + 1Discount / Cashback) vouchers during checkout.
+
+Voucher summary
+
+_The image is a flowchart diagram that categorizes different types of vouchers. It is divided into two main categories: "Platform Vouchers" and "Shop Vouchers." Each category further branches into three types of vouchers: "FSV," "Discount," and "Cashback." The "Platform Vouchers" are represented in orange, while the "Shop Vouchers" are in blue. The overall theme of the image is to illustrate the hierarchy and types of vouchers available within a system, likely for a platform like Shopee. The intended message is to provide a clear and organized visual representation of voucher classifications._
+
+
+Please note that in order mart, FSV vouchers are extracted as an individual category, thus platform voucher in order mart only include discount and cashback platform voucher.
+
+|                 |              |          |                                        |                                                              |
+| --------------- | ------------ | -------- | -------------------------------------- | ------------------------------------------------------------ |
+| Platform / Shop | Voucher type | Borne by | Voucher key                            | Example                                                      |
+| Platform        | FSV          | Shopee   | fsv\_promotion\_id  fsv\_voucher\_code | _The image is a promotional coupon or voucher from Shopee. It features a teal-colored vertical banner on the left with the text "FREE SHIPPING" in white. The main body of the image displays details about a shipping offer. It states "RM19 Min. Spend" and highlights "RM19 Free Shipping Sellers" in a red box. The offer is valid until "29.02.2020". On the right side, there are options to "Use" the voucher and a link to "T&C" for terms and conditions. The overall theme is to inform users about a free shipping promotion that requires a minimum purchase of RM19, valid for a specific date._ |
+ |
+| Platform | Discount | Shopee | pv\_voucher\_code  pv\_promotion\_id  pv\_voucher\_type  is\_pv\_seller\_absorbed = 0 | _The image is a promotional offer from Shopee, a popular e-commerce platform. It features a coupon with the following details:
+
+- **Discount Offer:** 20% off with a minimum spend.
+- **Capped Amount:** The discount is capped at RM12.
+- **Eligibility:** The offer is applicable to all sellers.
+- **Target Audience:** It is specifically for first-time users.
+- **Validity:** The offer is valid until 10.03.2020.
+- **Additional Information:** There are links to "Use" the coupon and "T&C" for terms and conditions.
+
+The image also includes the Shopee logo and the word "INITIATION" on the left side, indicating the start of a new user's journey on the platform. The overall theme is to attract new users with a limited-time discount._
+ |
+| Platform | Discount | Seller | pv\_voucher\_code  pv\_promotion\_id  pv\_voucher\_type  is\_pv\_seller\_absorbed = 1 | _The image is a promotional coupon or voucher. It features a logo for Nestlé, indicating a brand association. The main text states "50% off Min. Spend RM0 capped at RM10," which describes a discount offer. The offer is valid until "03.03.2020," providing a clear expiration date. There are two interactive elements: a "Use" button and a "T&C" (Terms & Conditions) link, suggesting that users can redeem the offer and view the terms. The overall theme is a marketing promotion aimed at encouraging purchases with a financial incentive._
+ |
+| Platform | Coin Cashback | Shopee | pv\_voucher\_code  pv\_promotion\_id  pv\_voucher\_type  is\_pv\_seller\_absorbed = 0 | _The image is a promotional graphic for a cashback offer. It features a bold "10%" in large white text on a red background, indicating a 10% cashback. Below, the text "CASHBACK" confirms the nature of the offer. The main body of the image details the offer specifics: "10% coins cashback Min. Spend RM0" with "No Max Limit" highlighted in a red box, suggesting there is no upper limit on the cashback amount. The offer is valid until "31.03.2020," and there is a "Use" button, likely for redeeming the offer. The "T&C" link at the bottom implies terms and conditions apply. The overall theme is a promotional cashback deal with clear, bold text for easy understanding._
+ |
+| Platform | Coin Cashback | Seller | pv\_voucher\_code  pv\_promotion\_id  pv\_voucher\_type  is\_pv\_seller\_absorbed = 1 | _The image is a promotional offer from Shopee, an online shopping platform. It features a red banner with the Shopee logo and text advertising a "Cashback 20% Min. Blj Rp0 s/d 10RB koin" for "Produk Ibu dan Bayi unileverindonesia" (Mother and Baby Unilever Indonesia products). The offer is valid until "23.02.2020". The image also includes a button labeled "Pakai" (Use) and a link to "S&K" (Terms & Conditions). The theme is a cashback promotion for specific baby and mother products._
+ |
+| Shop | Discount | Shopee | sv\_voucher\_code  sv\_promotion\_id  sv\_voucher\_type  is\_sv\_seller\_absorbed = 0 | _The image displays a promotional coupon from Shopee. It features a green banner with the text "Best Choice" and a logo with the letter "W" inside a stylized shape. The main text of the coupon states "$10 off Min. spend Rp300rb," indicating a discount offer. Below, it specifies the validity date as "Valid Till: 09.03.2019." The image is designed to inform users about a specific discount offer available on the Shopee platform, with clear details on the discount amount, minimum spend requirement, and expiration date._
+ |
+| Shop | Discount | Seller | sv\_voucher\_code  sv\_promotion\_id  sv\_voucher\_type  is\_sv\_seller\_absorbed = 1 | _The image is a digital coupon or voucher. It features a promotional offer of "$1 off Min. Spend $25" and indicates that it is valid until "06.09.2020". On the right side, there is a prominent red button labeled "Claim". The overall theme of the image is a promotional discount offer, and the key elements include the discount amount, the minimum spend requirement, the expiration date, and the claim button. The image is designed to convey a clear and straightforward offer to the user._
+ |
+| Shop | Coin Cashback | Shopee | sv\_voucher\_code  sv\_promotion\_id  sv\_voucher\_type  is\_sv\_seller\_absorbed = 0 | _The image displays a promotional offer from a digital platform, likely Shopee, featuring a cashback deal. The key elements include:
+
+1. **Logo**: A stylized "W" in a teal color, representing the platform's branding.
+2. **Offer Details**: 
+ - "80% Cashback Min. spend $400 Cap at 100" indicates a cashback offer of 80% up to a maximum of $100 for a minimum spend of $400.
+ - "Valid Till: 09.03.2019" specifies the expiration date of the offer.
+3. **Action Button**: An "Apply" button, suggesting that users can apply this offer to their purchases.
+
+The image conveys a clear promotional message aimed at encouraging users to make purchases by offering a cashback incentive, with specific terms and a limited-time validity._
+ |
+| Shop | Coin Cashback | Seller | sv\_voucher\_code  sv\_promotion\_id  sv\_voucher\_type  is\_sv\_seller\_absorbed = 1 | _The image displays a promotional offer from Shopee. It features a coupon with the following details:
+
+- **Offer Type:** 5% coins cashback.
+- **Minimum Spend:** $2.
+- **Capped at:** $200.
+- **Validity Date:** 25.10.2020.
+
+There is a prominent "Claim" button in red, indicating an action the user can take to redeem the offer. The overall theme of the image is to inform users of a cashback promotion that can be claimed before the specified date._
+ |
+
+\* Please note that coin\_earn is referring to the actual cash value
+
+---
+
+#
+
+# Common Questions
+
+## Q1: How is is\_bi\_excluded = 1 being determined?
+
+A1: BI Exclude refers to live testing / Paid Ads / Shopee Games / Rogue / SavingPass / LocalSIPDoubleCount orders that are excluded from management reporting. These orders are determined by whether they are placed by excluded buyer accounts or excluded shop accounts - which are determined by Local Teams and verified with Country PMs and/or Regional Finance Team. If you want to exclude a shop / order / buyer, you may raise an exclusion reason via [MartConfig](https://www.google.com/url?q=https://martconfig.traffic.shopee.io/blacklist-shops/new&sa=D&source=editors&ust=1757790484571325&usg=AOvVaw1-qL5NJjkbDgutAybkN_HI) Exclude Shop or Exclude Orders / Users (please be connected to VPN) and select either one of our Regional Finance colleagues to review your request.
+
+_The image is a flowchart titled "Exclusion Process Flow" and includes the Shopee logo. It outlines a procedural workflow for excluding a shop's orders from reports. Key elements include:
+
+1. **Initiation**: The process starts with a request from the Regional/Local Team to exclude a shop's orders.
+2. **Request Submission**: The team raises a request via MartConfig.
+3. **Reasoning**: Clear reasons for exclusion are needed.
+4. **Approval**: The request is reviewed by the Regional Finance team, which may reject and ask for a new reason or approve it.
+5. **Decision**: The Regional Finance team decides to approve or reject the request, aligning with the Local Team.
+6. **Implementation**: If approved, the Mart team processes the exclusion. If rejected, the team needs to ensure the shop is not excluded in local reports.
+7. **Backfill**: If a backfill is needed, it is raised via SDPS.
+
+The flowchart is structured with decision points and actions, guiding the user through the exclusion process. The theme is procedural and administrative, aimed at ensuring proper handling of order exclusions._
+
+
+## Q2: Where do the exchange rates used in Order Mart to convert from local to USD come from?
+
+A2: On the last working day of every month, SEA Finance will send us an excel file of the month’s last day exchange rates for each country. The Order Mart team will update the values to mp\_order.dim\_exchange\_rates. The last day exchange rates of the current month will determine the conversion rate of the up-coming month. For example, the exchange rates for Dec 2023 will be the last day exchange rates of Nov 2023. This rate is only updated once a month, but it is ingested on a daily basis.
+
+## Q3: Why are the values queried from Order Mart tables different from Admin Portal’s Order Page information?
+
+A3: There are 3 possible reasons:
+
+1. This is due to the time difference between order mart and admin portal. Order mart will update order information when order status has changed, but admin portal update information in real-time. So the time gap may cause some differences.
+2. If the order is still on-going, it can be a data issue due to ingestion or code error.
+3. Order mart will keep updating the data if the order is not in[terminal status](#h.ndelfjmsmwqy) , if the order is terminated, we put the grass\_date to the terminal date and won’t update anymore. In some very rare cases, order data will update after the terminal status (i.e. ASF, logistics\_status), there will some misalignment.
+
+1. [UPDATE]: For order logistics, it has  a separate cycle as compared to order main flow. Therefore when order is terminated, logistics data may still be updated. In order to get the accurate logistics data, please use our [order logistics tables](#h.x6ymrr15tb66) instead of dwd\_order/dwd\_order\_item
+
+## Q4: When will LATAM and the EU's full T-1 data be ready?
+
+A4: To support our colleagues in LATAM and EU to be able to perform analysis on T-1 data, the Order Mart team set up 2 runs. For more information please refer to the slide below:
+
+_The image is a detailed infographic from a Shopee user manual. It provides a timeline and schedule for when full T-1 data will be ready for LATAM and EU regions. The timeline includes specific times for two schedule runs and expected SLA (Service Level Agreement) times. Below the timeline, there is a table listing countries in different time zones (e.g., Argentina, Brazil, Spain, Poland, Mexico, Colombia, Chile) with their corresponding GMT and regional times. The table also indicates when full T-1 data is expected to be ready by local time for each country. The image aims to inform users about the expected availability of data in various regions._
+
+
+## Q5: Why do I encounter “file not found” / my workflow fails during certain hours on a daily basis?
+
+A5: If your workflow always fails or encounters “file not found” error anytime during 12 PM - 3PM and 4PM - 7PM (SGT), this is likely due to our 2nd schedule run especially if you are a regional user querying a regional order mart table.
+
+_The image is a screenshot from a Shopee user manual. It features a section titled "Question: Why do I encounter 'file not found' during certain hours on a daily basis?" The image includes a timeline graph illustrating "Expected SLA" for different regions (SEA, EU, LATAM) at various times (1 AM, 2 AM, 3:30 AM, 9 AM, 12 PM, 3 PM, 4 PM, 7 PM). The graph highlights "1st Schedule Run" and "2nd Schedule Run" with specific data processing details for each region.
+
+Below the graph, there is an "Explanation" box that provides a detailed answer to the question posed. It explains that data processing and overwriting occur during these scheduled runs, which can lead to errors when querying regional tables. It advises users to be patient and wait for about 10 minutes before retrying queries during the 2nd schedule run for EU and LATAM regions. It also notes that query execution duration should not exceed 1 hour when using Order Mart tables.
+
+The image is designed to inform users about the expected schedule for data processing and to guide them on how to handle potential errors related to querying data during these times._
+
+
+## Q6: How do I know which table marker to set dependency on?
+
+A6: _The image is a screenshot from a user manual for Shopee. It contains a table titled "Table Type" with columns "Regions," "Markers," and "Description." The table provides information on different table markers (e.g., DIM/DWD, DWS/ADS) and their respective descriptions for regional users. The descriptions detail specific data availability times and conditions for various regions and time zones. The image also includes a prominent question at the top: "How do I know which table marker to use as dependency?" This indicates that the image is designed to guide users in selecting the appropriate table marker based on their regional requirements. The overall theme is to provide clear, structured guidance for data querying within the Shopee platform._
+
+
+_The image is a screenshot from a user manual for Shopee. It contains a table and a description section. The table is titled "Table Type" and lists different types of data tables, such as "DIM/DWD" and "MX / CO / CL". The "Regions" column specifies various regional codes like "ID / IN / PH", "AR / BR / PL / ES / FR", and "MX / CO / CL". The "Markers" column shows specific table names, all containing "mp_order(table_name)_xx_s0_live.schedule".
+
+The "Description" section provides detailed information about the purpose and timing of data updates for these tables. It explains that the markers are used to support the update of data for specific regions up to T-1 midnight of Singapore Timezone or Local Timezone of the respective regions. It also mentions the recommended schedule settings for getting full T-1 local data.
+
+The image is designed to guide users on which table markers to use as dependencies for data updates, based on their regional requirements. The intended message is to provide clear instructions and recommendations for managing data dependencies in the Shopee platform._
+
+
+## Q7: Why are order\_price\_pp 0 for many items in dwd\_order\_item\_all\_ent\_df tables?
+
+* order\_price\_pp is the price that buyers pay for the item, it is possible for the order\_price\_pp=0 when there the item enjoys promotions like gift with purchase (one type of add on deal). When the item is the sub-item for gift with purchase, the order\_price is 0. Can refer to the item\_promotion\_type column to check for the promotions
+* Gift with purchase means hit a minimum spend of main item to get the sub item for free
+
+## Q8: What is the difference between order\_be\_status and order\_item\_status
+
+* In-short order items have 3 status:  active(1,2) , returned (3,4) , canceled (5) . Order item status is independently maintained as order\_be\_status though there is validation of order-level status before changing the status of orderitem.  So the values of orderitem status will be within the permissible limit.
+* For more details, please refer to [Order item status](#h.9bxhzlbbwol5) section for more details
+
+# Release Notes
+
+We are now using Notification center to send out email announcements and release notes for new releases/changes. For full listing of announcement, please refer to [https://datasuite.shopee.io/notification/message](https://www.google.com/url?q=https://datasuite.shopee.io/notification/message&sa=D&source=editors&ust=1757790484577698&usg=AOvVaw3RnZgYdNyy4R-KPaVEg3so)
+
+* [V3.9.3 New Release - Order Mart - backfill](https://www.google.com/url?q=https://docs.google.com/document/d/15Ms-kyww3LQNW4jP8E0123Ns6XEP42bt6mVCrHi2Gt0/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484577942&usg=AOvVaw1lX71kJWlsz31aftM6XREt)
+* [V3.9.2 New dws\_seller\_cdate\_gmv\_1d table](https://www.google.com/url?q=https://docs.google.com/document/d/1wE1y-H_fK2gTEVbhEkGFyIPXrdZyxD27mGol_-7-CCE/edit%23&sa=D&source=editors&ust=1757790484578114&usg=AOvVaw2gvI5rMAF7sWEKNz0zfr6y)
+* [V3.9.1 Add paid\_order\_cnt\_1d, complete\_order\_cnt\_1d to dws\_item\_gmv\_1d table](https://www.google.com/url?q=https://docs.google.com/document/d/1mwGd3_MP9oDTOS5DSKiwW5ZqFErdkAFiYj3PvYuzJH0/edit&sa=D&source=editors&ust=1757790484578341&usg=AOvVaw2x0aM_aTrfmPUKvw9cU_zE)
+* [V3.9.0 Add new columns to store net\_commission\_fee, net\_service\_fee, net coins-related columns, buyer\_checkout\_email\_address and insurance\_quantity into order mart](https://www.google.com/url?q=https://docs.google.com/document/d/1otdYkXYu_KxmSlQON90ow8M9oBC8qhrt9BWJTbuKSt4/edit&sa=D&source=editors&ust=1757790484578633&usg=AOvVaw3pZxRx0Qga1OQDnEHCZISu)
+* [V3.8.9 Add updated\_warehouse\_code and extinfo into order mart](https://www.google.com/url?q=https://docs.google.com/document/d/1XptF0jRKylSV78d1d-zIiutWITWgZUA8ISnPKrH8Kso/edit%23heading%3Dh.rhdntvpxnvgd&sa=D&source=editors&ust=1757790484578842&usg=AOvVaw1TO0FFZ646UiFK4lLcUW-p)
+* [V3.8.8 FULL reinitialisation of dwd\_return\_item\_all\_ent\_df](https://www.google.com/url?q=https://docs.google.com/document/d/1lV66EcI2hLrQoaFyvx6L3xwRF_UcQI4iErKv9Pe3yE8/edit%23&sa=D&source=editors&ust=1757790484579021&usg=AOvVaw1qfiSCXnMKP85cm3DIL6Xr)
+* [V3.8.7 Release new columns to store net\_seller\_txn\_fee and net\_buyer\_txn\_fee on order-item level](https://www.google.com/url?q=https://docs.google.com/document/d/1py3ehQo5Ci2i0Xs_oQUzXh5gtkPgwDTsQ2DOEyt1RGA/edit%23heading%3Dh.qgugzc7iymm2&sa=D&source=editors&ust=1757790484579260&usg=AOvVaw1SYAGdvegVZHnlA01nxLL8)
+* [V3.8.6 Release STS Mart module and update order terminal state conditions](https://www.google.com/url?q=https://docs.google.com/document/d/1GLW-uZS50ZUs3vBQEFU8NP6lZ6PMjraeuU6N330_Dfo/edit%23heading%3Dh.kfnn4uszu9xv&sa=D&source=editors&ust=1757790484579473&usg=AOvVaw09FAx4aLFO_6XDuVAcxdFT)
+* [V3.8.5 add new columns to dws\_item\_gmv\_nd\_\_reg\_s0\_live](https://www.google.com/url?q=https://docs.google.com/document/d/1YpdsYqw3y9xhgvGCeJZ0xNoIa_RfmB8f9yESDWVJMZw/edit%23&sa=D&source=editors&ust=1757790484579643&usg=AOvVaw2tELesXhD9Vpfm0CGc-ggU)
+
+* [V3.8.4 Refactor](https://www.google.com/url?q=https://docs.google.com/document/d/1S4Nhka1NSJ1NLmaSG31rXzpUqtnNIZPlZ7lcugqBv6o/edit%23&sa=D&source=editors&ust=1757790484579769&usg=AOvVaw1suTzmudK5SGjf_WeSVtPu) [estimate\_shipping\_rebate\_by\_shopee\_amt; add](https://www.google.com/url?q=https://docs.google.com/document/d/1S4Nhka1NSJ1NLmaSG31rXzpUqtnNIZPlZ7lcugqBv6o/edit%23&sa=D&source=editors&ust=1757790484579890&usg=AOvVaw1yFJFYUitRcy88CXhLbNOy) [sip\_afflicate\_order\_id, affiliate\_region and other columns to order item tables; add pickup\_timestamp, pickup\_datetime to order and order item table; add refund\_id to return item table](https://www.google.com/url?q=https://docs.google.com/document/d/1S4Nhka1NSJ1NLmaSG31rXzpUqtnNIZPlZ7lcugqBv6o/edit%23&sa=D&source=editors&ust=1757790484580151&usg=AOvVaw0nijlZqL1C4iOfi_2LmPTm)
+* [V3.8.3 Refactor is\_shopee\_pay flag and add new is\_shopee\_pay\_later flag](https://www.google.com/url?q=https://docs.google.com/document/d/1I0sgtUVSg_2LPBlODJkjmMHDAOpF-NRJ66hb7O501UM/edit%23heading%3Dh.z45ijvbf283a&sa=D&source=editors&ust=1757790484580361&usg=AOvVaw0ze3VJoYIyAlDSUSOlMdHh)
+* [V3.8.2 Update price\_before\_discount\_pp column logic, add is\_welcome\_package flag. add corresponding sip\_afflicate\_order\_id for SIP orders as well as the affiliate\_region](https://www.google.com/url?q=https://docs.google.com/document/d/1VeGdavfBq-B86TSQv8z1IFsEEZFI91foLYPCv8WTAjs/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484580660&usg=AOvVaw1mYai41bI7efrLXLRXpAPT)
+* [v3.8.1 new shipping columns to daily order mart, and adding card\_promotion\_id to hourly order mart](https://www.google.com/url?q=https://docs.google.com/document/d/1plqkzrQrITzEkir8Lb0o1hSedJbmIjT3Lgpm-nnKtSY/edit&sa=D&source=editors&ust=1757790484580883&usg=AOvVaw0pdpScl5s_CgpjXA2uaoSg)
+* [v3.8.0 new hourly DIM table for PRM co-sponsorship data and new columns to order\_item\_cashback table](https://www.google.com/url?q=https://docs.google.com/document/d/145xbO7mDt-qe7E5M0pDCc1LrxWh7r4OyMqONRaA6DjY/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484581114&usg=AOvVaw0tkvGR9ayKngO6XWoAndNg)
+* v[3.7.6 add insurance fields & VAT fields to DWD, and new payment mapping to DIM](https://www.google.com/url?q=https://docs.google.com/document/u/0/d/1gKPh7UumhHw8oyF7tfxU05C-sB_Sj0Zgl7JqDCLkHdk/edit&sa=D&source=editors&ust=1757790484581321&usg=AOvVaw04yXLiP7lNV6JQV1Zya_ew)
+* [v3.7.5 refactoring buyer\_shipping\_address and dropping sensitive columns from s0 tables](https://www.google.com/url?q=https://docs.google.com/document/d/15zXVfys4D3_Mag7UyN0WwO54VqPEZp-tHliLMQyeFdE/edit%23&sa=D&source=editors&ust=1757790484581547&usg=AOvVaw3VRk_JpehhRFJgkFJYxnUO)
+* [v3.7.4 Add new columns - is\_preferred\_plus\_shop and value\_added\_tax\_amt to DWD tables](https://www.google.com/url?q=https://docs.google.com/document/u/0/d/1jjHc_p3K6WDt2oBJCOUdDqSUpgF3s-edZrVXoNBr9HI/edit&sa=D&source=editors&ust=1757790484581743&usg=AOvVaw0nczNABubBirHWqtPFJwaS)
+* [v3.7.3 New net metrics for dws\_buyer\_net\_gmv\_nd/td](https://www.google.com/url?q=https://docs.google.com/document/d/1FKkHny0gsbp3rEUAC43GrWHugHkWXcyc5lt3DYAlDiI/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484581906&usg=AOvVaw3lmIqlqgt07xCYm--g36dv)
+* [v3.7.2 refactored logic for order item seller txn fee, new tax columns for IN, and new first purchase DWS metrics](https://www.google.com/url?q=https://docs.google.com/document/d/1JAmoPMcLDfx5wqgx6G8HQo0N8kWI-f97wWN4TOzeixk/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484582141&usg=AOvVaw3GDUnIlbxFoqpMNCg1F9tt)
+* [v3.7.1 hourly mart bundle deal update, new columns in return item df, and sensitive data migration](https://www.google.com/url?q=https://docs.google.com/document/d/1Ye-cXEupJMRBeMyUXMrU_Lbr22mMi72dZRvjdFaOC7k/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484582359&usg=AOvVaw0GLYDSoCYOX10asthSjAKL)
+* [v3.7.0 add new buyer and seller level DWS table](https://www.google.com/url?q=https://docs.google.com/document/d/15N7b6hyIHCka8UYj21g8oAjIN6wgkyTDsiLcF2XkA5M/edit%23heading%3Dh.z45ijvbf283a&sa=D&source=editors&ust=1757790484582528&usg=AOvVaw30kYQe-lFxhCyD_fOLftr8)
+* [v3.6.8 add new columns and rectify logics](https://www.google.com/url?q=https://docs.google.com/document/u/0/d/1o7duvVKK1ZZHDMge_mnawOSkITh1WJPqPPCPUIJTPSI/edit&sa=D&source=editors&ust=1757790484582682&usg=AOvVaw1ZkKRiKDcc3UiOqcUmPXPn)
+* [v3.6.7 add local category names to dws\_buyer\_purchase\_categories\_td](https://www.google.com/url?q=https://docs.google.com/document/d/10MuV3OJ2coO3Ma6NhF14R6isf6HTR860sqWMTrkEZ0k/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484582860&usg=AOvVaw1dJ459j4NVvLlUhAMOZZO2)
+* [v3.6.6  add new columns and refactor actual\_shipping\_rebate\_by\_seller\_amt (daily mart)](https://www.google.com/url?q=https://docs.google.com/document/d/1a-4QdGghNk3Zu9KEkFYAPf7sDeknt09aVjDe10rHWVk/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484583069&usg=AOvVaw144QeHMOA2W-2t6Xq0ys7X)
+* [v3.6.5 add nvm metrics to buyer\_net\_gmv DWS tables](https://www.google.com/url?q=https://docs.google.com/document/d/1WCmgLwKvczc7YwpHRsd5vGPJchf51Zzxt1DTQOnYKRI/edit&sa=D&source=editors&ust=1757790484583231&usg=AOvVaw3M5W8hj8e59Vgy4R6GRptF)
+* [v3.6.4 New columns and technical enhancements](https://www.google.com/url?q=https://docs.google.com/document/d/1znxZwJhTVYKknrAN0wfmQ9kcD_AFewRPn64nOIEpbPs/edit?usp%3Dsharing&sa=D&source=editors&ust=1757790484583391&usg=AOvVaw1lfap0VimNJYvbTGep7eDe)
+* [v3.6.3 Bundle Deal Migration](https://www.google.com/url?q=https://docs.google.com/document/d/13I2nPF4mR8xY3Um13NPqYW-IIt_gBXwuoQWyyzKmGqM/edit%23&sa=D&source=editors&ust=1757790484583530&usg=AOvVaw0NGORgOhhmURR-xJsFBpcC)
+* [v3.6.2 Update to Total Buyer Checkout DWS tables](https://www.google.com/url?q=https://docs.google.com/document/d/1DAlJ2wXeufqMSezs0NLaRZg_Dkd9rjuL8v53mnFnVoM/edit%23heading%3Dh.z45ijvbf283a&sa=D&source=editors&ust=1757790484583695&usg=AOvVaw0P32yas3Jtj2JUe_6sp_zh)
+* [v3.6.1 Include is\_fbs\_shop to Order Item tables](https://www.google.com/url?q=https://docs.google.com/presentation/d/1GYABoHgk3IDkw2f1PaSkjw4jaR5mHy0TXM8RheBWfFE/edit%23slide%3Did.ge39fbf67b6_0_26&sa=D&source=editors&ust=1757790484583888&usg=AOvVaw3EuQe08JSRNG4nlsTGevuS)
+* [v3.6.0 Add net\_\_order\_cnt and placed\_base\_checkout\_cnt metrics to DWS tables](https://www.google.com/url?q=https://docs.google.com/document/d/1Or-hZdVkSRKWI_u9dTY8xIZOBVXREoBqBbcNL9QlVYI/edit&sa=D&source=editors&ust=1757790484584092&usg=AOvVaw2afYwCmxXP1ukm2jDWR923)
+* [v3.2.6 Refactor shipping columns logic](https://www.google.com/url?q=https://docs.google.com/document/d/1juzqYWXhec9ZyWfOdn1ODvgJVPu57zA_dOfMf_ww3bE/edit%23heading%3Dh.96hnt523bmm6&sa=D&source=editors&ust=1757790484584255&usg=AOvVaw3FW1qd8of2IKDGVU9lgZ33) [based on INVALID / CANCEL\_COMPLETED status](https://www.google.com/url?q=https://docs.google.com/document/d/1juzqYWXhec9ZyWfOdn1ODvgJVPu57zA_dOfMf_ww3bE/edit%23heading%3Dh.96hnt523bmm6&sa=D&source=editors&ust=1757790484584388&usg=AOvVaw3pTXWznBUR0ME82fiZOxwP)
+* [v3.2.5 Add Shipping Discount Columns](https://www.google.com/url?q=https://docs.google.com/document/d/1juzqYWXhec9ZyWfOdn1ODvgJVPu57zA_dOfMf_ww3bE/edit%23heading%3Dh.590xu9kuuht8&sa=D&source=editors&ust=1757790484584542&usg=AOvVaw25sqedEqkE7wW3bp3WDkaH)
+The ID Marketplace (MP) Order Mart is a centralized data source for extracting and analyzing key data related to order events within Shopee’s Indonesia Marketplace platform. It supports various order-related analyses across different stages of the MP order process.
+Order Mart
+
+---
+
+# Introduction
+
+The intent of the order mart is to allow users to extract and analyze data relevant to order events within the Shopee platform across all regions. The order mart will cover orders within Marketplace (MP) only.
+
+Order flow contain 4 key stages:
+
+* Forward Order Processing (Order Place/Pay/Complete)
+* Order Fulfillment
+* Return and Refund (can happen before or after escrow process)
+* Escrow
+
+# Overview
+
+It is recommend to read the following Domain Knowledge introduction to have a better understanding of order related topic.
+
+* [Order Key Entities and Dimensions](https://sites.google.com/shopee.com/shopee-data-mart/data-mart-user-guide/order-mart/marketplace-domain-knowledge/order-key-entities-and-dimensions?authuser=0)
+* [Order Mart Key Metrics](https://sites.google.com/shopee.com/shopee-data-mart/data-mart-user-guide/order-mart/marketplace-domain-knowledge/order-key-metrics?authuser=0)
+* [Order Related Key Entities, Vouchers and Promotions](https://sites.google.com/shopee.com/shopee-data-mart/data-mart-user-guide/order-mart/marketplace-domain-knowledge/promotion-and-voucher?authuser=0)
+* [Payment Channels](https://sites.google.com/shopee.com/shopee-data-mart/data-mart-user-guide/order-mart/marketplace-domain-knowledge/payment-channels?authuser=0)
+
+Key event of Order:
+
+| Event                                 | Description                                                  | remark                                                       |
+| ------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Forward Order Processing (Order Core) | Forward Order Processing consists 3 main status:  1. Unpaid (Place): State before order is paid. For COD, it will always be this state until payment is made  2. Paid: State will become paid from unpaid for Non-COD after payment is done or COD after goods is delivered and paid  3. Completed: This status is triggered when buyer click the received goods button or after a fixed amount of days of no action when buyer did not receive the goods | ![](https://datasuite.shopee.io/dataforum/multimedia/api/v1/media/3f71613e0a4260ee739d64d298c240de.png) |
+| Order Fulfillment                     | After order is placed to supply chain, the trigger of logistics status machine movement could be initiated from supply chain via order processing. | ![undefined](https://datasuite.shopee.io/dataforum/multimedia/api/v1/media/9332b82e10daa5a958831ec28852130a.png) |
+| Return                                | A buyer can initiate multiple return requests for one order. Only one request can be active at any given time and once the request is successful, not more subsequent request can be submitted. | ![](https://datasuite.shopee.io/dataforum/multimedia/api/v1/media/8a0c44080b3e66745648a9258da9f26c.png) |
+| Refund                                | There are four sources of refunds: checkout (overpaid), order (cancellation), OFG (cancellation), and return (finalized the request). All these data are stored in the same table. |                                                              |
+| Escrow                                | Escrow refers to order payment being kept by Shopee until the buyer confirms receipt of the order or when Shopee Guarantee period ends. |                                                              |
+| Checkout                              | The event when clicking checkout button at Shopping Cart or Buy Now button. |                                                              |
+| Cart                                  | In the user cart, cart items under the same shop are grouped together under one shop. Different models of the same items will be displayed separately in the cart page and be treated as different entities and the attributes will be model-level.  Therefore in our mart table, one row of data is per user/shop/item/model level, similar to the actual cart behaviour. |                                                              |
+| Settlement                            | Settlement System answers the 3 questions for a Shopee marketplace transaction that requires money settlement with seller: Whom to pay? How much to pay? How to pay? The marketplace transactions can be generalized as Escrow and Adjustment. In order to settle for these transactions, the Settlement System needs to integrate with a few upstream systems (source of txn) and downstream systems (payment facilitator). |                                                              |
+| Seller Wallet                         |                                                              |                                                              |
+
+For more detail please refer to our [User Guide](https://sites.google.com/shopee.com/shopee-data-mart/fundamental-mart/order-mart)
+
+# Accessing and Querying Table
+
+It is strongly recommend to go through marketplace data mart basic guides for using any marketplace data mart table
+
+* [What is Data Mart?](https://datasuite.shopee.io/datamap/mart/10)
+* [Request table access through RAM system](https://sites.google.com/shopee.com/datasuite/resource-access-management/table-access-management?authuser=0)
+* [Rely on table marker for accurate table completion time](https://sites.google.com/shopee.com/shopee-data-mart/general-data-mart-knowledge/useful-information/data-mart-marker-data-mart-running-schedule?authuser=0#h.lc70w5eb25sc)
+* [Timezones used in Mart table](https://sites.google.com/shopee.com/shopee-data-mart/general-data-mart-knowledge/useful-information/data-mart-marker-data-mart-running-schedule?authuser=0)
+
+Refer to below link to explore our tables accordingly:
+
+* [Order Mart Table List](https://docs.google.com/spreadsheets/d/1OFRLtIVle5Xn2_G_0hxXcLPlNsTy3D6_3eavhY3yky4/edit?usp=sharing)
+
+
+
+# Table Maintenance
+
+While users primarily interact with the data, it's essential to understand that the data mart table requires ongoing maintenance and updates from the data management team. Changes in data sources, data quality checks, and updates to the underlying architecture ensure the accuracy and reliability of the data.
+
+* Refer to [here](https://datasuite.shopee.io/notification/data-change-event?schema=mp_order) for Mart Change Event Log
+
+
+
+Support
+
+|                     |                                                              |
+| ------------------- | ------------------------------------------------------------ |
+| Raise requirement   | [Link to Requirement portal](https://datasuite.shopee.io/ticket/center/create/DATA_MART_REQUIREMENT) |
+| Report Issues/ Bugs | [Ticket Center](https://datasuite.shopee.io/ticket/center/create/DATA_ISSUE) |
+| General Inquiries   | [Support group](https://sites.google.com/shopee.com/shopee-data-mart/general-data-mart-knowledge/data-mart-list) |
+| Data change notice  | Targeted emails through [Notification Center](https://datasuite.shopee.io/notification/message) |
+| Weekly data forum   | [Signup link](https://docs.google.com/spreadsheets/d/1TI-cHWBCHJ92lQx8o4QUMFtMRXmE2hZDCGKGwB2IIRc/edit#gid=1298759107) |
+| Feedback            | [Feedback form link](https://docs.google.com/forms/d/e/1FAIpQLScRzXHNnR0H4sBejoWobKl69w3oYqH7Bt2pjJ0kItXcmxUWiw/viewform) |
+
+# Order Mart FAQ
+
+Please proceed to [here](https://docs.google.com/document/d/1NkpDYLikLCRliJubXTbK3GXpLxa-0-G03Ud5OaX0rWI/edit#heading=h.seo6xn9gu7xn) for common questions
+
+---
+
+
+
+| 1.1  | ORDER_EXT_UNPAID            | ORDER_EXT_PAID              | Checkout state machine: PAYMENT_PAID.non-COD: payment successfulCOD: order logistics status is LOGISTICS_DELIVERY_DONE |
+| ---- | --------------------------- | --------------------------- | ------------------------------------------------------------ |
+| 1.2  | ORDER_EXT_UNPAID            | ORDER_EXT_CANCEL_PENDING    | Buyer cancels COD order outside instant cancellation window, and cancellation requires seller approvalFor non-COD order, when buyer's cancellation request will be subject to seller approval, order must have been paid. |
+| 1.3  | ORDER_EXT_UNPAID            | ORDER_EXT_INVALID           | Any cancellation succeeds when order is in ORDER_EXT_UNPAIDFor COD orders, any cancellation before delivery_done will be under this category |
+| 2.1  | ORDER_EXT_PAID              | ORDER_EXT_COMPLETED         | Buyer or system triggers order completion                    |
+| 2.2  | ORDER_EXT_PAID              | ORDER_EXT_RETURN_PROCESSING | Buyer raised return request for the order                    |
+| 2.3  | ORDER_EXT_PAID              | ORDER_EXT_CANCEL_PENDING    | Buyer cancelled order after paid but outside instant cancellation window, and cancellation requires seller approval |
+| 2.4  | ORDER_EXT_PAID              | ORDER_EXT_CANCEL_PROCESSING | Order cancelled and pending refund paid out                  |
+| 3.1  | ORDER_EXT_COMPLETED         | ORDER_EXT_ESCROW_CREATED    | Immediately after order completion                           |
+| 4.1  | ORDER_EXT_CANCEL_PENDING    | ORDER_EXT_INVALID           | For COD order, seller approves or system auto approves buyer cancellation request and cancel the order |
+| 4.2  | ORDER_EXT_CANCEL_PENDING    | ORDER_EXT_CANCEL_PROCESSING | For non-COD order, seller approves or system auto approves buyer cancellation request and cancel the order, and pending refund paid out |
+| 4.3  | ORDER_EXT_CANCEL_PROCESSING | ORDER_EXT_CANCEL_COMPLETED  | Order cancelled and refund paid out                          |
+| 5.1  | ORDER_EXT_RETURN_PROCESSING | ORDER_EXT_RETURN_COMPLETED  | Return is completed                                          |
+| 5.2  | ORDER_EXT_RETURN_COMPLETED  | ORDER_EXT_ESCROW_CREATED    | After return completed, there is still escrow to seller for this order. |
+| 6.1  | ORDER_EXT_ESCROW_CREATED    | ORDER_EXT_ESCROW_PENDING    | Escrow is pending manual verification due to special seller SLA, or suspected fraud / abuse. |
+| 6.2  | ORDER_EXT_ESCROW_PENDING    | ORDER_EXT_ESCROW_VERIFIED   | Escrow amount is final, and ready to be processed by payout module. |
+| 6.3  | ORDER_EXT_ESCROW_VERIFIED   | ORDER_EXT_ESCROW_PAYOUT     | Escrow request has been sent to 3rd party, and awaiting response. |
+| 6.4  | ORDER_EXT_ESCROW_PAYOUT     | ORDER_EXT_ESCROW_PAID       | Escrow has been paid out to seller.                          |
+| 6.5  | ORDER_EXT_ESCROW_CREATED    | ORDER_EXT_ESCROW_VERIFIED   | Escrow amount is final, and ready to be processed by payout module without human intervention. |
+| 6.6  | ORDER_EXT_ESCROW_VERIFIED   | ORDER_EXT_ESCROW_PENDING    | Escrow is pending manual verification after escrow amount is final |
+| 6.7  | ORDER_EXT_ESCROW_PAYOUT     | ORDER_EXT_ESCROW_PENDING    | Escrow is pending manual verification after escrow amount is sent to payout module |
+| 6.8  | ORDER_EXT_ESCROW_VERIFIED   | ORDER_EXT_ESCROW_PAID       | Escrow has been paid out to seller without going through 3rd party |
+| 6.9  | ORDER_EXT_ESCROW_PENDING    | ORDER_EXT_CANCEL_PROCESSING | Order cancelled by Ops after escrow human verification       |
+
+
+
+
+
+
+
+| Transition no | Name               | use case                                                     | transition conditions                                        | side affects                                                 |
+| ------------- | ------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| 0             | N/A → CREATED      | Created by us via order cancellation, order return, etc.     | -                                                            | Add refund audit.Add checkout audit for refund created.Send email for some channels in [BR](https://confluence.shopee.io/display/SMLT/[BR][RR]+Refund+Transactional+Email). |
+| 1             | CREATED → PENDING  | Auto move from created to pending if config enabled for payment method and users don't have verified bank account (currently not in use).Move from created to pending in the admin portal by operators manually. | -                                                            | Add refund audit.Send email for some channels in [BR](https://confluence.shopee.io/display/SMLT/[BR][RR]+Refund+Transactional+Email). |
+| 2             | CREATED → VERIFIED | Auto move from created to verified if auto transition (1) doesn't occur.Move from created to verified in the admin portal by operators manually. | All to be removed: [TD](https://confluence.shopee.io/display/SPCT/[TD][Changes]+-+Disable+Refund+Verified+Checks)The buyer can use wallet ORThe refund amount is 0 ORThe refund's payment channel is whitelisted ORThe refund's bank account is VERIFIED or CHECKED.If not, send invalid BA PN | Add refund audit.Call SPM instant refund based on some [criteria](https://confluence.shopee.io/display/SPCT/[PRD]+Improve+the+refund+payout+logic). |
+| 3             | PENDING → VERIFIED | Auto move from pending to verified with same checks as in 2.Move from pending to verified in the admin portal by operators manually. | All to be removed: [TD](https://confluence.shopee.io/display/SPCT/[TD][Changes]+-+Disable+Refund+Verified+Checks)The buyer can use wallet ORThe refund amount is 0 ORThe refund's payment channel is whitelisted ORThe refund's bank account is VERIFIED or CHECKED.If not, send invalid BA PN | Add refund audit.Payout refund to wallet and transition status to paid. (Currently disabled in the FSM)Call SPM instant refund based on some [criteria](https://confluence.shopee.io/display/SPCT/[PRD]+Improve+the+refund+payout+logic). |
+| 4             | VERIFIED → PENDING | Move the refund from verified to pending in the admin portal by operators manually. | -                                                            | Add refund audit.Send email for some channels in [BR](https://confluence.shopee.io/display/SMLT/[BR][RR]+Refund+Transactional+Email). |
+| 5             | PENDING → DELETED  | Move the refund from pending to deleted in the admin portal by operators manually. | -                                                            | Add refund audit.                                            |
+| 6             | VERIFIED → PAYOUT  | SPM move the refund from verified to payout based on instant refund triggered by us in (2) and (3).Move the refund from verified to payout in the admin portal by operators manually. | -                                                            | Add refund audit.Send a PN to the buyer, for all regions, if enabled. (Currently disabled: [SPOT-36183](https://jira.shopee.io/browse/SPOT-36183?src=confmacro)- Jira 问题不存在或者您没有权限查看。).Send email for some channels [BR](https://confluence.shopee.io/display/SMLT/[BR][RR]+Refund+Transactional+Email). |
+| 7             | PAYOUT → PENDING   | SPM move the refund from payout to pending based on instant refund triggered by us in (2) and (3).Move the refund from payout to pending in the admin portal by operators manually. | -                                                            | Add refund audit.                                            |
+| 8             | PAYOUT → PAID      | SPM move the refund from payout to paid based on instant refund triggered by us in (2) and (3).Move the refund from payout to paid in the admin portal by operators manually. | -                                                            | Add refund audit.Add checkout audit for refund paid.Send a PN to the buyer, for all regions, if enabled. Currently partially disabled: [SPOT-36183](https://jira.shopee.io/browse/SPOT-36183?src=confmacro)- Jira 问题不存在或者您没有权限查看。).Update order status to cancel completed or return status to refund paid. |
+| 9             | -                  | Special case: Payout refund to wallet and move refund from verified to paid: https://confluence.shopee.io/x/_vQtPw. | -                                                            | Add refund auditAdd checkout audit for refund paid.Update order status to cancel completed or return status to refund paid. |
