@@ -2938,3 +2938,511 @@ webClient.post()
 - **tracker**: 累积收集流过程中的所有数据和状态
 - **previousTracker**: 在流CANCEL时恢复到稳定状态
 
+---
+
+## SSE断点续传机制深度分析
+
+**更新时间**: 2025-12-05  
+**分析重点**: Session切换、SSE续传、高并发压力测试问题
+
+---
+
+### 一、断点续传核心架构
+
+#### 1.1 整体流程图
+
+```
+用户请求 /chat/stream
+    ↓
+CommonChatController.commonChatStream()
+    ↓ executor.execute() 异步执行
+CommonChatStreamService.commonChatStreamSse()
+    ↓
+┌─────────────────────────────────────────────────────────┐
+│           两个独立的 Reactive 订阅                        │
+├─────────────────────────────────────────────────────────┤
+│ 1. createStreamSubscription()                           │
+│    - 连接 DiBrain WebClient                              │
+│    - 处理流事件                                          │
+│    - 保存事件到 response_event_tab                       │
+│    - 独立运行，不受 SSE 断开影响                          │
+├─────────────────────────────────────────────────────────┤
+│ 2. sendEventsToFrontend()                               │
+│    - 每 1s 轮询 MySQL                                    │
+│    - 将事件推送到 SseEmitter                             │
+│    - SSE 断开时停止，后台订阅继续                         │
+└─────────────────────────────────────────────────────────┘
+    ↓
+用户切换 Session / SSE 断开
+    ↓
+/chat/reopen 断点续传
+    ↓
+sendEventsToFrontend(messageId, startEventId, emitter)
+    ↓
+从上次 eventId 继续拉取事件
+```
+
+#### 1.2 关键数据表
+
+| 表名 | 作用 | 关键字段 |
+|------|------|----------|
+| `response_event_tab` | 存储流事件 | message_id, event_id, content, create_time |
+| `response_state_tab` | 存储流状态 | message_id, session_id, status, create_time |
+
+#### 1.3 状态流转
+
+```
+PROCESS → COMPLETE  (正常完成)
+PROCESS → CANCEL    (用户取消)
+PROCESS → ERROR     (异常终止)
+```
+
+---
+
+### 二、代码问题分析
+
+#### 2.1 Controller 层问题
+
+**代码位置**: `CommonChatController.java:63-84`
+
+```java
+private final ExecutorService executor = Executors.newFixedThreadPool(10);
+
+@PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public SseEmitter commonChatStream(...) {
+    SseEmitter emitter = new SseEmitter(SSE_EMITTER_TIMEOUT);
+    Map<String, String> mdcContext = MDC.getCopyOfContextMap();
+    executor.execute(() -> {
+        if (mdcContext != null) {
+            MDC.setContextMap(mdcContext);
+        }
+        commonChatStreamService.commonChatStreamSse(requestVO, emitter);
+        MDC.clear();  // ⚠️ 问题：不在 finally 块中
+    });
+    return emitter;
+}
+```
+
+**问题列表**:
+
+| 问题 | 描述 | 严重程度 |
+|------|------|----------|
+| 线程池过小 | `newFixedThreadPool(10)` 只有10个线程，高并发时阻塞 | 🔴 高 |
+| MDC 清理位置错误 | `MDC.clear()` 应在 finally 块，异常时不会清理 | 🟡 中 |
+| 无限流量 | 没有对 SSE 连接数进行限流 | 🔴 高 |
+| 无异常处理 | executor 内部异常没有捕获，SseEmitter 不会关闭 | 🔴 高 |
+
+#### 2.2 commonChatStreamSse 方法问题
+
+**代码位置**: `CommonChatStreamService.java:102-213`
+
+```java
+public void commonChatStreamSse(CommonChatRequestVO requestVO, SseEmitter sseEmitter) {
+    // ...
+    Boolean isProcess = responseStateTabService.queryStatus(session.getSessionId());
+    if (Objects.equals(isProcess, Boolean.TRUE)) {
+        throw new ServerException(...);  // ⚠️ 竞态条件
+    }
+    // ... 创建 tracker, chatId 等
+    responseStateTabService.saveStatus(responseChatId, ...);  // ⚠️ 非原子操作
+    // ...
+    try {
+        // 业务逻辑
+    } catch (Exception e) {
+        log.error(...);  // ⚠️ 没有关闭 sseEmitter
+    }
+}
+```
+
+**问题列表**:
+
+| 问题 | 描述 | 严重程度 |
+|------|------|----------|
+| 竞态条件 | `queryStatus` 到 `saveStatus` 之间存在时间窗口，并发请求可能同时通过检查 | 🔴 高 |
+| SSE 资源泄漏 | catch 块中没有关闭 sseEmitter，连接可能泄漏 | 🔴 高 |
+| 无分布式锁 | 同一 Session 多次请求没有互斥保护 | 🟡 中 |
+
+#### 2.3 createStreamSubscription 方法问题
+
+**代码位置**: `CommonChatStreamService.java:228-361`
+
+```java
+public Disposable createStreamSubscription(...) {
+    return webClient.post()
+        .uri(diBrainUrl + "/router/stream")
+        // ...
+        .mergeWith(Flux.interval(Duration.ofSeconds(1))  // ⚠️ 每秒轮询
+            .flatMap(tick -> {
+                if (responseStateTabService.isCanceled(messageId)) {  // ⚠️ DB查询
+                    // ...
+                }
+                // ...
+            }))
+        .subscribeOn(Schedulers.boundedElastic())  // ⚠️ 弹性线程池
+        .subscribe(...);
+}
+```
+
+**问题列表**:
+
+| 问题 | 描述 | 严重程度 |
+|------|------|----------|
+| 频繁 DB 查询 | 每秒调用 `isCanceled()` 查询数据库，N 个连接 = N 次/秒 | 🔴 高 |
+| 线程池压力 | `Schedulers.boundedElastic()` 每个订阅占用线程 | 🟡 中 |
+| WebClient 连接池 | 没有配置连接池参数，高并发可能耗尽 | 🟡 中 |
+| Disposable 未管理 | 返回的 Disposable 在 Controller 层未使用（警告） | 🟢 低 |
+
+#### 2.4 sendEventsToFrontend 方法问题
+
+**代码位置**: `CommonChatStreamService.java:371-457`
+
+```java
+public Disposable sendEventsToFrontend(Long messageId, Long startEventId, SseEmitter sseEmitter) {
+    AtomicLong lastEventId = new AtomicLong(startEventId);
+    AtomicBoolean isEnd = new AtomicBoolean(false);
+
+    return Flux.interval(Duration.ofMillis(1000))  // ⚠️ 每秒轮询
+        .flatMap(tick -> {
+            List<ResponseEventTab> events = responseEventTabService.queryByMessageId(
+                messageId, lastEventId.get() > 0 ? lastEventId.get() + 1 : null);  // ⚠️ DB查询
+            // ...
+            for (ResponseEventTab event : events) {
+                sseEmitter.send(event.getContent());  // ⚠️ 同步发送
+            }
+            // ...
+        })
+        .subscribeOn(Schedulers.boundedElastic())  // ⚠️ 又一个弹性线程
+        .subscribe(...);
+}
+```
+
+**问题列表**:
+
+| 问题 | 描述 | 严重程度 |
+|------|------|----------|
+| 轮询间隔固定 | 1秒轮询过于频繁，事件少时浪费资源 | 🟡 中 |
+| DB 查询压力 | 每秒查询一次，高并发时 QPS = 并发数 | 🔴 高 |
+| 同步发送 | `sseEmitter.send()` 是同步的，可能阻塞 | 🟡 中 |
+| 无批量优化 | 每次查询只查单个 messageId，无批量合并 | 🟡 中 |
+
+---
+
+### 三、高并发压力测试场景分析
+
+#### 3.1 资源消耗模型
+
+假设同时有 **N** 个活跃 SSE 连接：
+
+| 资源类型 | 消耗公式 | 1000并发时 |
+|----------|----------|------------|
+| Controller 线程池 | min(N, 10) 被阻塞 | 10个线程满载，990排队 |
+| boundedElastic 线程 | N × 2 (stream + polling) | 2000个弹性线程 |
+| DB 查询 QPS | N × 2 (cancel检查 + event拉取) | 2000 QPS |
+| WebClient 连接 | N | 1000个HTTP连接 |
+| SseEmitter 对象 | N | 1000个对象 |
+
+#### 3.2 瓶颈分析
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    瓶颈金字塔                            │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│              ┌───────────────────┐                      │
+│              │  Controller 线程池  │  ← 最先耗尽 (10个)   │
+│              │   newFixedThreadPool(10)                 │
+│              └───────────────────┘                      │
+│                        ↓                                │
+│         ┌─────────────────────────────┐                 │
+│         │   Schedulers.boundedElastic  │ ← 次之 (CPU*10) │
+│         │   默认: availableProcessors() * 10            │
+│         └─────────────────────────────┘                 │
+│                        ↓                                │
+│     ┌─────────────────────────────────────┐             │
+│     │         MySQL 连接池                  │ ← 再次之   │
+│     │   HikariCP 默认: 10 connections       │            │
+│     └─────────────────────────────────────┘             │
+│                        ↓                                │
+│  ┌───────────────────────────────────────────┐          │
+│  │           WebClient 连接池                  │          │
+│  │   Netty 默认: 500 pending acquisitions     │          │
+│  └───────────────────────────────────────────┘          │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 3.3 具体问题场景
+
+**场景1: 线程池阻塞**
+```
+压测 100 并发 → 
+    Controller 线程池 (10个) 满载 →
+    90 个请求在队列等待 →
+    用户感知: 请求卡住，无响应
+```
+
+**场景2: 数据库压力**
+```
+压测 500 并发 →
+    每秒 DB 查询: 500 × 2 = 1000 QPS →
+    HikariCP 连接池 (10个) 满载 →
+    查询延迟上升 →
+    事件推送延迟 →
+    用户感知: SSE 数据刷新慢
+```
+
+**场景3: 弹性线程池耗尽**
+```
+压测 1000 并发 →
+    boundedElastic 线程: 1000 × 2 = 2000 →
+    超过默认上限 (CPU × 10, 假设 80) →
+    任务排队/拒绝 →
+    用户感知: 流中断或超时
+```
+
+**场景4: SSE 连接泄漏**
+```
+异常发生 →
+    catch 块未关闭 SseEmitter →
+    Tomcat SSE 连接未释放 →
+    积累后达到 maxConnections →
+    新请求被拒绝
+```
+
+---
+
+### 四、优化建议
+
+#### 4.1 Controller 层优化
+
+```java
+// 优化前
+private final ExecutorService executor = Executors.newFixedThreadPool(10);
+
+// 优化后
+private final ExecutorService executor = new ThreadPoolExecutor(
+    20,                      // corePoolSize
+    200,                     // maximumPoolSize
+    60L, TimeUnit.SECONDS,   // keepAliveTime
+    new LinkedBlockingQueue<>(1000),  // 有界队列
+    new ThreadPoolExecutor.CallerRunsPolicy()  // 拒绝策略
+);
+
+@PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public SseEmitter commonChatStream(...) {
+    SseEmitter emitter = new SseEmitter(SSE_EMITTER_TIMEOUT);
+    Map<String, String> mdcContext = MDC.getCopyOfContextMap();
+    
+    executor.execute(() -> {
+        try {
+            if (mdcContext != null) {
+                MDC.setContextMap(mdcContext);
+            }
+            commonChatStreamService.commonChatStreamSse(requestVO, emitter);
+        } catch (Exception e) {
+            log.error("SSE stream error", e);
+            emitter.completeWithError(e);  // 确保关闭
+        } finally {
+            MDC.clear();
+        }
+    });
+    
+    return emitter;
+}
+```
+
+#### 4.2 竞态条件优化 - 使用分布式锁
+
+```java
+public void commonChatStreamSse(CommonChatRequestVO requestVO, SseEmitter sseEmitter) {
+    String lockKey = "session:stream:" + requestVO.getSessionId();
+    
+    // 使用 Redis 分布式锁或数据库乐观锁
+    boolean acquired = redisLockService.tryLock(lockKey, 30, TimeUnit.SECONDS);
+    if (!acquired) {
+        throw new ServerException(ResponseCodeEnum.STREAM_ERROR, "Session is running.");
+    }
+    
+    try {
+        // 原有业务逻辑
+    } finally {
+        redisLockService.unlock(lockKey);
+    }
+}
+```
+
+#### 4.3 减少 DB 轮询压力
+
+**方案A: 增加轮询间隔 + 指数退避**
+
+```java
+public Disposable sendEventsToFrontend(Long messageId, Long startEventId, SseEmitter sseEmitter) {
+    AtomicLong lastEventId = new AtomicLong(startEventId);
+    AtomicBoolean isEnd = new AtomicBoolean(false);
+    AtomicInteger emptyCount = new AtomicInteger(0);  // 空轮询计数
+
+    return Flux.generate(
+        () -> 500L,  // 初始间隔 500ms
+        (interval, sink) -> {
+            sink.next(interval);
+            return Math.min(interval * 2, 5000L);  // 最大 5 秒
+        }
+    )
+    .delayElements(Duration.ofMillis(500))  // 初始延迟
+    .flatMap(interval -> {
+        List<ResponseEventTab> events = responseEventTabService.queryByMessageId(...);
+        
+        if (events.isEmpty()) {
+            if (emptyCount.incrementAndGet() > 3) {
+                // 连续空轮询，增加间隔
+                return Flux.just(false).delayElements(Duration.ofMillis(interval));
+            }
+        } else {
+            emptyCount.set(0);  // 重置计数
+        }
+        // ...
+    });
+}
+```
+
+**方案B: 使用消息队列代替轮询**
+
+```
+createStreamSubscription()
+    ↓ 保存事件
+    ↓ 同时发送到 Redis Pub/Sub 或 Kafka
+    ↓
+sendEventsToFrontend()
+    ↓ 订阅 Redis/Kafka
+    ↓ 实时接收事件
+    ↓ 推送到 SSE
+```
+
+#### 4.4 取消状态检查优化
+
+```java
+// 优化前: 每秒查询 DB
+.mergeWith(Flux.interval(Duration.ofSeconds(1))
+    .flatMap(tick -> {
+        if (responseStateTabService.isCanceled(messageId)) { ... }
+    }))
+
+// 优化后: 使用本地缓存 + 延长检查间隔
+private final Cache<Long, Boolean> cancelStatusCache = Caffeine.newBuilder()
+    .expireAfterWrite(2, TimeUnit.SECONDS)
+    .maximumSize(10000)
+    .build();
+
+.mergeWith(Flux.interval(Duration.ofSeconds(3))  // 3秒检查一次
+    .flatMap(tick -> {
+        Boolean canceled = cancelStatusCache.get(messageId, 
+            key -> responseStateTabService.isCanceled(key));
+        if (Boolean.TRUE.equals(canceled)) { ... }
+    }))
+```
+
+#### 4.5 异常处理完善
+
+```java
+public void commonChatStreamSse(CommonChatRequestVO requestVO, SseEmitter sseEmitter) {
+    try {
+        // 业务逻辑
+    } catch (ServerException e) {
+        log.error("Business error in SSE stream", e);
+        sendErrorEvent(sseEmitter, e.getMessage());
+        sseEmitter.completeWithError(e);
+    } catch (Exception e) {
+        log.error("Unexpected error in SSE stream", e);
+        sendErrorEvent(sseEmitter, "Internal server error");
+        sseEmitter.completeWithError(e);
+    }
+}
+
+private void sendErrorEvent(SseEmitter emitter, String message) {
+    try {
+        CommonChatStreamEvent errorEvent = new CommonChatStreamEvent();
+        errorEvent.setStatus(StreamStatusType.ERROR.getType());
+        errorEvent.setMessage(message);
+        emitter.send(JsonUtils.toJsonWithOutNull(errorEvent));
+    } catch (IOException ignored) {
+        // 忽略发送失败
+    }
+}
+```
+
+---
+
+### 五、压力测试检查清单
+
+#### 5.1 测试前准备
+
+- [ ] 调整 Controller 线程池大小
+- [ ] 配置 HikariCP 连接池 (最小20, 最大100)
+- [ ] 配置 WebClient 连接池参数
+- [ ] 开启慢查询日志
+- [ ] 准备监控 (线程数、DB连接、内存)
+
+#### 5.2 测试场景
+
+| 场景 | 并发数 | 持续时间 | 关注指标 |
+|------|--------|----------|----------|
+| 基线测试 | 10 | 5min | 响应时间、成功率 |
+| 中压测试 | 100 | 10min | 线程池使用率、DB QPS |
+| 高压测试 | 500 | 15min | 资源耗尽、错误率 |
+| 极限测试 | 1000 | 5min | 系统崩溃点 |
+
+#### 5.3 关键监控指标
+
+```
+# 线程池
+jvm_threads_states{state="runnable"}
+executor_pool_size{name="sseExecutor"}
+executor_queue_size{name="sseExecutor"}
+
+# 数据库
+hikaricp_connections_active
+hikaricp_connections_pending
+
+# WebClient
+reactor_netty_connection_provider_active_connections
+
+# SSE
+sse_emitter_active_count (自定义)
+sse_emitter_error_count (自定义)
+```
+
+---
+
+### 六、总结
+
+#### 6.1 当前架构优缺点
+
+**优点**:
+- 解耦设计: 后台流处理与前端推送分离
+- 断点续传: 用户切换 Session 后可恢复
+- 状态持久化: 事件存储在数据库，可追溯
+
+**缺点**:
+- 轮询模式: 高并发时 DB 压力大
+- 线程消耗: 每个连接占用多个线程
+- 无流控: 缺少限流和熔断
+
+#### 6.2 优先修复项
+
+| 优先级 | 问题 | 影响 | 修复难度 |
+|--------|------|------|----------|
+| P0 | Controller 线程池过小 | 阻塞请求 | 低 |
+| P0 | catch 块未关闭 SSE | 连接泄漏 | 低 |
+| P1 | 竞态条件 | 数据不一致 | 中 |
+| P1 | DB 轮询过于频繁 | 数据库压力 | 中 |
+| P2 | 无连接限流 | 资源耗尽 | 中 |
+| P2 | 弹性线程池配置 | 线程耗尽 | 低 |
+
+#### 6.3 长期优化方向
+
+1. **引入消息队列**: 用 Redis Pub/Sub 或 Kafka 替代 DB 轮询
+2. **WebSocket 替代 SSE**: 双向通信，更好的连接管理
+3. **分布式限流**: 使用 Sentinel 或 Resilience4j
+4. **连接池化**: 统一管理所有资源池
+5. **监控告警**: 完善的 Metrics + 告警体系
+
