@@ -24,6 +24,7 @@ RAG 检索出来的结果**不是直接传给 LLM**，而是被拼接进 `chat_h
 **文件位置**：`di_brain/ask_data/graph.py`
 
 这是 RAG 上下文检索的核心函数，负责：
+
 1. 调用 `compose_kb_context()` 从多个知识源检索并组装上下文
 2. 将检索结果写入 `SystemMessage` 或 `HumanMessage`
 3. 更新 `chat_history.msg_list` 供后续 LLM 调用
@@ -470,13 +471,13 @@ class KnowledgeBaseDetail:
 
 **各文档类型的用途**：
 
-| document_type | 用途 | text_content 格式 |
-|---------------|------|-------------------|
-| `datamap_table_manifest` | 表清单，列出可用表及简要说明 | 纯文本 |
-| `datamap_table_detail` | 表详情（字段、分区、示例数据） | JSON |
-| `datamart_desc_doc` | Mart 业务文档说明 | 纯文本 |
-| `confluence` | Confluence 落库的文档 | 纯文本 |
-| `google_doc` | Google Doc 落库的文档 | 纯文本 |
+| document_type            | 用途                           | text_content 格式 |
+| ------------------------ | ------------------------------ | ----------------- |
+| `datamap_table_manifest` | 表清单，列出可用表及简要说明   | 纯文本            |
+| `datamap_table_detail`   | 表详情（字段、分区、示例数据） | JSON              |
+| `datamart_desc_doc`      | Mart 业务文档说明              | 纯文本            |
+| `confluence`             | Confluence 落库的文档          | 纯文本            |
+| `google_doc`             | Google Doc 落库的文档          | 纯文本            |
 
 #### 3.1.2 辅助表：`mart_top_sql_tab`
 
@@ -520,6 +521,7 @@ def get_table_retriever() -> MilvusWithSimilarityRetriever:
 ```
 
 **Collection 字段**：
+
 - `uid`：主键，格式 `idc_region.schema.table_name`
 - `schema`：库名
 - `table_group_name`：表分组
@@ -584,6 +586,7 @@ def get_hive_column_retriever(filter: str) -> MilvusWithSimilarityRetriever:
 ```
 
 **Collection 字段**：
+
 - `id`：列 ID
 - `table_uid`：所属表的 uid
 - `column_name`：列名
@@ -659,14 +662,14 @@ def es_hint_to_doc_mapper(hit: Mapping[str, Any]) -> Document:
 
 ### 3.4 检索范围总结表
 
-| 存储类型 | 位置 | 粒度 | 主要内容 | RAG 用途 |
-|---------|------|------|----------|----------|
-| MySQL | `shopee_di_rag_db.knowledge_base_details_v1_5_0` | KB 记录 | 表清单、表详情、Mart 文档 | 结构化 KB 上下文 |
-| MySQL | `shopee_di_rag_db.mart_top_sql_tab` | 表级 | 高频 SQL 示例 | SQL 示例参考 |
-| Milvus | `di_rag_hive_table_with_ai_desc_v2` | 表级 | 表描述向量 | 语义检索表 |
-| Milvus | `di_rag_hive_table_with_columns_and_ai_desc_v2` | 表级(带列) | 表+列综合向量 | Schema 上下文 |
-| Milvus | `di_rag_hive_column_info_v2` | 列级 | 列描述向量 | 字段检索 |
-| ES | `di-rag-hive-description` | 表级 | 表描述文本 | BM25 文本检索 |
+| 存储类型 | 位置                                             | 粒度       | 主要内容                  | RAG 用途         |
+| -------- | ------------------------------------------------ | ---------- | ------------------------- | ---------------- |
+| MySQL    | `shopee_di_rag_db.knowledge_base_details_v1_5_0` | KB 记录    | 表清单、表详情、Mart 文档 | 结构化 KB 上下文 |
+| MySQL    | `shopee_di_rag_db.mart_top_sql_tab`              | 表级       | 高频 SQL 示例             | SQL 示例参考     |
+| Milvus   | `di_rag_hive_table_with_ai_desc_v2`              | 表级       | 表描述向量                | 语义检索表       |
+| Milvus   | `di_rag_hive_table_with_columns_and_ai_desc_v2`  | 表级(带列) | 表+列综合向量             | Schema 上下文    |
+| Milvus   | `di_rag_hive_column_info_v2`                     | 列级       | 列描述向量                | 字段检索         |
+| ES       | `di-rag-hive-description`                        | 表级       | 表描述文本                | BM25 文本检索    |
 
 ---
 
@@ -687,6 +690,7 @@ Here are some hive tables related to the data mart:
 ### 4.2 表详情（TableDetail）
 
 JSON 格式，包含：
+
 - `table_name`：表名
 - `schema`：库名
 - `idc_region`：区域
@@ -949,6 +953,786 @@ TABLE_COLUMN_ORIGIN_RETRIVE_LIMIT = 22  # 列信息检索 22 条
 
 ---
 
+## 7. 向量数据库 Milvus 详解
+
+### 7.1 为什么 RAG 需要向量数据库？
+
+#### 7.1.1 核心问题：语义理解
+
+传统的关键词检索（如 MySQL `LIKE`、ES BM25）基于**词汇匹配**，无法理解语义：
+
+```
+用户问题："哪个表存储了用户的购买记录？"
+
+关键词检索的问题：
+- 搜索 "购买记录" 可能找不到 "order_fact"（订单事实表）
+- 因为 "购买" ≠ "order"，"记录" ≠ "fact"
+- 即使表描述里写的是 "stores customer transactions"，也无法匹配
+```
+
+#### 7.1.2 向量检索的解决方案
+
+向量数据库通过 **Embedding（向量嵌入）** 将文本转换为高维向量，捕捉语义信息：
+
+```python
+# di_brain/milvus/milvus_search.py (第 73-84 行)
+def get_text_embedding(text, openai_client):
+    """将文本转换为embedding向量"""
+    # 限制文本长度
+    if len(text) > 7000:
+        text = text[:7000]
+
+    embeddings = openai_client.embeddings.create(
+        input=[text],
+        model=COMPASS_EMBEDDING_MODEL,           # compass-embedding-v3
+        dimensions=COMPASS_EMBEDDING_DIMENSIONS,  # 384 维
+    )
+    return embeddings.data[0].embedding
+```
+
+**工作原理**：
+
+1. 将用户问题转换为 384 维向量
+2. 在向量空间中，语义相近的文本距离更近
+3. 通过 L2 距离（欧氏距离）找到最相似的表/列
+
+```
+"购买记录" → [0.12, -0.34, 0.56, ...]  (384维)
+"order transactions" → [0.11, -0.32, 0.58, ...]  (384维)
+
+两个向量在语义空间中非常接近，即使词汇完全不同！
+```
+
+#### 7.1.3 项目中的实际应用
+
+```python
+# di_brain/hive_query.py (第 135-158 行)
+def get_table_retriever() -> MilvusWithSimilarityRetriever:
+    vs = MilvusWithQuery(
+        connection_args=milvus_config,
+        collection_name="di_rag_hive_table_with_ai_desc_v2",
+        embedding_function=get_embeddings_model(),  # 使用 Embedding 模型
+        vector_field="table_vector",
+        primary_field="uid",
+    )
+    return MilvusWithSimilarityRetriever(
+        vectorstore=vs,
+        search_kwargs={
+            "k": 100,                    # 返回前 100 个最相似的结果
+            "param": {
+                "metric_type": "L2",     # 使用 L2 距离度量
+                "params": {"nprobe": 1200, "reorder_k": 200},
+            },
+            "score_threshold": 600,      # 距离阈值过滤
+        },
+    )
+```
+
+### 7.2 没有向量数据库会有什么问题？
+
+#### 7.2.1 检索质量下降
+
+| 场景                       | 只用关键词检索                | 加上向量检索                                  |
+| -------------------------- | ----------------------------- | --------------------------------------------- |
+| 用户问"用户画像表"         | 可能找不到 `user_profile_dim` | ✅ 语义匹配找到                                |
+| 用户问"GMV 怎么算"         | 只能匹配包含 "GMV" 的文档     | ✅ 还能找到 "gross merchandise value" 相关内容 |
+| 用户用中文问，表描述是英文 | ❌ 完全无法匹配                | ✅ 跨语言语义匹配                              |
+| 用户表述不精确             | ❌ 召回率低                    | ✅ 模糊语义匹配                                |
+
+#### 7.2.2 具体影响
+
+1. **Text2SQL 准确率下降**：找不到正确的表，生成的 SQL 就会用错表
+2. **数据发现失败**：用户问"有没有订单相关的表"，可能漏掉关键表
+3. **多语言支持差**：中文问题无法匹配英文描述的表
+
+#### 7.2.3 项目中的多引擎融合策略
+
+项目采用**向量检索 + 全文检索**双引擎融合，互相补充：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      用户问题                                │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+         ┌─────────────┴─────────────┐
+         ▼                           ▼
+┌─────────────────┐         ┌─────────────────┐
+│  Milvus 向量检索  │         │   ES BM25 检索   │
+│  (语义相似度)     │         │  (关键词匹配)     │
+└────────┬────────┘         └────────┬────────┘
+         │                           │
+         └─────────────┬─────────────┘
+                       ▼
+              ┌───────────────┐
+              │   结果融合     │
+              │  (Rerank)     │
+              └───────────────┘
+```
+
+如果去掉 Milvus：
+
+- 只剩 ES BM25，语义理解能力大幅下降
+- 召回率（Recall）可能从 90%+ 降到 60% 以下
+- 用户体验显著变差
+
+### 7.3 其他向量数据库对比
+
+#### 7.3.1 主流向量数据库
+
+| 向量数据库 | 开源 | 分布式 | 云原生 | 混合查询 | 主要用户           |
+| ---------- | ---- | ------ | ------ | -------- | ------------------ |
+| **Milvus** | ✅    | ✅      | ✅      | ✅        | 阿里、腾讯、Shopee |
+| Pinecone   | ❌    | ✅      | ✅      | ✅        | OpenAI、Notion     |
+| Weaviate   | ✅    | ✅      | ✅      | ✅        | Vectara            |
+| Qdrant     | ✅    | ✅      | ✅      | ✅        | 初创公司           |
+| Chroma     | ✅    | ❌      | ❌      | ❌        | 原型开发           |
+| pgvector   | ✅    | ❌      | ❌      | ✅        | PostgreSQL 用户    |
+| FAISS      | ✅    | ❌      | ❌      | ❌        | Meta、研究机构     |
+
+#### 7.3.2 各数据库特点
+
+**Pinecone**：
+
+- 全托管服务，无需运维
+- 按用量付费，成本可控
+- 但是**闭源**，数据在第三方
+
+**Weaviate**：
+
+- 内置 ML 模块，支持自动向量化
+- GraphQL API，查询灵活
+- 社区相对较小
+
+**Qdrant**：
+
+- Rust 编写，性能优秀
+- 支持过滤器优化
+- 较新，生态不如 Milvus 成熟
+
+**Chroma**：
+
+- 轻量级，适合原型开发
+- 单机版，不适合生产环境
+
+**pgvector**：
+
+- PostgreSQL 扩展，运维简单
+- 性能有限，10 万级数据量适用
+
+**FAISS**：
+
+- Facebook 开源，算法层面优秀
+- 只是库，不是数据库，无持久化/分布式支持
+
+### 7.4 为什么选择 Milvus？
+
+#### 7.4.1 项目需求分析
+
+di-brain 的向量检索需求：
+
+1. **数据规模**：16 万+ 张 Hive 表，每张表有多列，总向量数 100 万+
+2. **查询性能**：毫秒级响应，支持并发
+3. **混合查询**：需要同时支持向量检索 + 标量过滤（按 schema、data_mart 过滤）
+4. **高可用**：生产环境，不能单点故障
+5. **成本**：开源优先，减少云服务依赖
+
+#### 7.4.2 Milvus 优势
+
+**1. 专为大规模向量设计**
+
+```python
+# di_brain/milvus/milvus_search.py (第 107-128 行)
+search_params = {
+    "metric_type": "L2",
+    "params": {
+        "ef": 200,  # 对于16万数据量，200是一个比较平衡的值
+    },
+}
+
+results = milvus_client.search(
+    collection_name=COLLECTION_NAME,
+    data=[query_vector],
+    filter=filter_expr,      # ✅ 支持标量过滤
+    limit=top_k,
+    output_fields=[          # ✅ 支持返回额外字段
+        "uid", "schema", "table_group_name",
+        "business_domain", "data_marts", "description",
+    ],
+    search_params=search_params,
+)
+```
+
+**2. 混合查询能力**
+
+```python
+# 向量检索 + 标量过滤（项目中的实际用法）
+# di_brain/hive_query.py (第 161-183 行)
+def get_hive_column_retriever(filter: str) -> MilvusWithSimilarityRetriever:
+    return MilvusWithSimilarityRetriever(
+        vectorstore=vs,
+        search_kwargs={
+            "k": 200,
+            "expr": filter,  # ✅ 例如 "table_uid in ['SG.dwd.order_fact']"
+            "param": {
+                "metric_type": "L2",
+                "params": {"nprobe": 1200, "reorder_k": 200},
+            },
+        },
+    )
+```
+
+**3. 丰富的索引类型**
+
+| 索引类型 | 适用场景         | 项目使用   |
+| -------- | ---------------- | ---------- |
+| HNSW     | 高精度、内存充足 | ✅ 主要使用 |
+| IVF_FLAT | 平衡精度和速度   | -          |
+| IVF_PQ   | 大规模、内存有限 | -          |
+
+**4. LangChain 官方支持**
+
+```python
+# 项目直接使用 LangChain 的 Milvus 集成
+from langchain_community.vectorstores import Milvus
+
+class MilvusWithQuery(Milvus):  # 继承并扩展
+    def query_by_expresion(self, expr, timeout, **kwargs):
+        # 自定义查询逻辑
+        ...
+```
+
+**5. 成熟的生态系统**
+
+- LF AI & Data 基金会毕业项目（与 Linux Foundation 同级）
+- 腾讯、阿里、Shopee 等大厂生产环境验证
+- 活跃的社区和完善的文档
+
+#### 7.4.3 项目中的 Milvus 配置
+
+```python
+# di_brain/config/default_config_json.py
+"milvus_config": {
+    "host": "milvus-sg.data-infra.shopee.io",
+    "port": "19530",
+    "user": "root",
+    "password": "Milvus",
+    "secure": false
+}
+
+# 实际使用的 Collection
+COLLECTION_NAME = "di_rag_hive_table_manifest_v1"      # 表清单向量
+# 或
+COLLECTION_NAME = "di_rag_hive_table_with_ai_desc_v2"  # 表描述向量
+COLLECTION_NAME = "di_rag_hive_column_info_v2"         # 列描述向量
+```
+
+#### 7.4.4 为什么不选其他？
+
+| 备选方案 | 不选择的原因                                         |
+| -------- | ---------------------------------------------------- |
+| Pinecone | 闭源、数据出境合规问题、按量付费成本高               |
+| pgvector | 16 万+ 表规模下性能不足                              |
+| Chroma   | 单机版，无法支撑生产环境                             |
+| FAISS    | 只是算法库，需要自建持久化、分布式等基础设施         |
+| Weaviate | 生态不如 Milvus 成熟，LangChain 集成不如 Milvus 完善 |
+
+### 7.5 向量检索的完整流程
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        向量检索完整流程                                    │
+└──────────────────────────────────────────────────────────────────────────┘
+
+1. 离线阶段（数据入库）
+   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+   │ Hive 表元数据 │ → │ Embedding   │ → │ 写入 Milvus  │
+   │ (描述、字段)  │    │ 模型转向量   │    │ Collection  │
+   └─────────────┘    └─────────────┘    └─────────────┘
+   
+2. 在线阶段（查询检索）
+   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+   │ 用户问题     │ → │ Embedding   │ → │  Milvus     │
+   │ "订单表"     │    │ 模型转向量   │    │  向量检索    │
+   └─────────────┘    └─────────────┘    └─────────────┘
+                                                │
+                                                ▼
+                                        ┌─────────────┐
+                                        │ Top-K 结果   │
+                                        │ 按相似度排序  │
+                                        └─────────────┘
+```
+
+**关键代码**：
+
+```python
+# di_brain/milvus/milvus_search.py (第 87-150 行)
+def search_similar_tables(query_text, top_k=10, filter_expr=None):
+    """通过文本查询搜索相似的表信息"""
+    
+    # 1. 将查询文本转换为向量
+    query_vector = get_text_embedding(query_text, openai_client)
+
+    # 2. 执行向量搜索
+    search_params = {
+        "metric_type": "L2",
+        "params": {"ef": 200},
+    }
+
+    results = milvus_client.search(
+        collection_name=COLLECTION_NAME,
+        data=[query_vector],
+        filter=filter_expr,  # 可选的标量过滤
+        limit=top_k,
+        output_fields=["uid", "schema", "description", ...],
+        search_params=search_params,
+    )
+
+    # 3. 格式化结果
+    formatted_results = []
+    for hit in results[0]:
+        entity = hit.get("entity", {})
+        result = {
+            "uid": entity.get("uid"),
+            "schema": entity.get("schema"),
+            "description": entity.get("description"),
+            "distance": hit.get("distance"),
+            "score": 1 / (1 + hit.get("distance", 1)),  # 转换为相似度分数
+        }
+        formatted_results.append(result)
+
+    return formatted_results
+```
+
+---
+
+## 8. 样例 SQL 检索
+
+### 8.1 概述
+
+样例 SQL 检索从 MySQL 数据库中获取各表的高频 SQL 示例，供 LLM 在生成 SQL 时参考，帮助生成更符合实际使用习惯的查询语句。
+
+### 8.2 数据源
+
+**MySQL 表**：`mart_top_sql_tab`
+
+```python
+# di_brain/config/default_config_json.py
+"generate_sql": {
+    "table_name": "mart_top_sql_tab"
+}
+```
+
+**表结构**：
+
+| 字段 | 说明 |
+|------|------|
+| `tbl_name` | 表名 |
+| `sql_content` | SQL 内容 |
+| `usage_count` | 使用次数 |
+
+### 8.3 核心代码
+
+**文件位置**：`di_brain/ask_data/database/query.py`
+
+```python
+# di_brain/ask_data/database/query.py (第 360-423 行)
+def get_table_top_sql_by_name_list(
+    table_names: List[str],
+) -> dict:
+    """
+    Fetch the top SQL queries for the given table names.
+
+    Args:
+        table_names (List[str]): A list of table names to query. 
+                                 Could be idc_region.schema.table_name, 
+                                 schema.table_name, table_name.
+
+    Returns:
+        dict: A dictionary of table names and their corresponding SQL content 
+              strings ordered by usage count.
+    """
+    # 移除 IDC 区域前缀
+    table_names = [_remove_prefix(name) for name in table_names]
+    
+    results = {}
+    connection = get_connection()
+    
+    with connection.cursor() as cursor:
+        for table_name in table_names:
+            table_parts = table_name.split(".")
+            
+            # 查询每个表的 TOP 3 高频 SQL
+            sql = f"""
+                SELECT sql_content, usage_count
+                FROM {TABLE_TOP_SQL_TABLE_NAME}
+                WHERE tbl_name = %s
+                ORDER BY usage_count DESC
+                LIMIT 3
+            """
+            cursor.execute(sql, (table_parts[1],))
+            rows = cursor.fetchall()
+            
+            # 提取 SQL 内容
+            results[table_name] = [row["sql_content"] for row in rows]
+    
+    return results
+```
+
+### 8.4 调用时机
+
+在 Text2SQL 流程的 `process_context_and_table_samples` 节点中调用：
+
+```python
+# di_brain/text2sql/text2sql_step.py (第 669-678 行)
+if not chat_bi_follow_up:
+    # Step 2: Fetch sample SQL
+    try:
+        table_sample_sql = get_table_top_sql_by_name_list(table_titles)
+        if isinstance(table_sample_sql, str):
+            logger.warning(f"Error fetching sample SQL: {table_sample_sql}")
+            table_sample_sql = "No sample SQL available."
+        state["sample_sql"] = table_sample_sql
+    except Exception as error:
+        logger.error(f"Error fetching sample SQL: {error}")
+```
+
+### 8.5 在 Prompt 中的使用
+
+样例 SQL 会被注入到 LLM Prompt 的 `<context>` 部分：
+
+```python
+# di_brain/text2sql/text2sql_prompt.py
+"""
+<context> 
+    {context} 
+    Here are some sample SQLs of tables you may reference: {sample_sql}
+    Here are some sample data of tables you may reference: {sample_data}
+<context/> 
+"""
+```
+
+### 8.6 输出示例
+
+```python
+{
+    "dwd.order_fact": [
+        "SELECT order_id, user_id, gmv FROM dwd.order_fact WHERE grass_date = '2024-01-01'",
+        "SELECT COUNT(*) FROM dwd.order_fact WHERE status = 'completed'",
+        "SELECT SUM(gmv) FROM dwd.order_fact GROUP BY region"
+    ],
+    "dim.user_dim": [
+        "SELECT * FROM dim.user_dim WHERE user_id = 12345",
+        "SELECT user_name, register_date FROM dim.user_dim LIMIT 100"
+    ]
+}
+```
+
+---
+
+## 9. 样例数据检索
+
+### 9.1 概述
+
+样例数据检索从 KB Service API 获取各表的预览数据（每列的样例值），帮助 LLM 理解数据的实际格式和取值范围，从而生成更准确的 SQL（如日期格式、枚举值等）。
+
+### 9.2 数据源
+
+**KB Service API**：
+
+```python
+# di_brain/kb/kb_client.py (第 334-382 行)
+def get_sample_data(self, schema: str, table_name: str) -> List[Dict[str, Any]]:
+    """
+    获取样本数据
+
+    获取指定Hive表的样本数据，包括列信息和预览数据
+    优先从本地数据库获取，如果不存在则调用DataMap API获取实时数据
+
+    Args:
+        schema: 数据库schema名称
+        table_name: 表名
+
+    Returns:
+        样本列数据列表（原始JSON数据）
+    """
+    # 构建API端点URL
+    endpoint = f"{self.base_url}/sample-data/{schema}/{table_name}"
+    
+    response = requests.get(endpoint, headers=self.headers, timeout=60)
+    response.raise_for_status()
+    
+    resp_json = response.json()
+    result = resp_json.get("data", [])
+    
+    return result
+```
+
+### 9.3 核心代码
+
+**文件位置**：`di_brain/tools/datamap_table_sample_tool.py`
+
+#### 9.3.1 获取原始样例数据
+
+```python
+# di_brain/tools/datamap_table_sample_tool.py (第 23-106 行)
+def get_table_sample_data(
+    table_full_names: Union[str, List[str]],
+    hadoop_account: str,
+) -> Union[str, List[Dict]]:
+    """
+    Fetch sample data for the given list of table full names.
+
+    Args:
+        table_full_names: A list of table full names or a comma-separated string.
+                         Table name could be idc_region.schema.table_name 
+                         or schema.table_name
+
+    Returns:
+        A list of dictionaries containing table names and their sample data.
+    """
+    # 移除 IDC 区域前缀
+    req_tables = [_remove_prefix(item) for item in table_full_names]
+
+    def fetch_table_data(table):
+        table_parts = table.split(".")
+        if len(table_parts) != 2:
+            return None
+        
+        # 使用 kb_client 获取样本数据
+        sample_data = kb_client.get_sample_data(table_parts[0], table_parts[1])
+        return {table: sample_data}
+
+    # 并行获取多个表的样例数据
+    ret = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+        future_to_table = {}
+        for table in req_tables:
+            future = executor.submit(fetch_table_data, table)
+            future_to_table[future] = table
+            time.sleep(DATAMAP_REQUEST_INTERVAL)  # 避免 QPS 限制
+        
+        for future in future_to_table:
+            result = future.result()
+            if result:
+                ret.append(result)
+
+    return ret
+```
+
+#### 9.3.2 格式化样例数据
+
+```python
+# di_brain/tools/datamap_table_sample_tool.py (第 109-156 行)
+def extract_table_sample_data(
+    sample_data_info: any,
+    limit_preview_data: bool = False,
+) -> Union[str, List[Dict]]:
+    """
+    Extract and format table sample data.
+
+    Returns:
+        A formatted representation of the table sample data.
+    """
+    if isinstance(sample_data_info, list):
+        ret = []
+        for item in sample_data_info:
+            for table_name, columns in item.items():
+                table_data = {"table_name": table_name, "columns": []}
+
+                for column in columns:
+                    column_name = column.get("name", "unknown_column")
+                    column_type = column.get("dataType", "unknown_type")
+                    column_preview_data = column.get("previewData", [])
+                    
+                    # 限制预览数据条数
+                    if limit_preview_data and len(column_preview_data) > 3:
+                        column_preview_data = column_preview_data[:3]
+
+                    table_data["columns"].append({
+                        "column_name": column_name,
+                        "column_type": column_type,
+                        "preview_data": column_preview_data,
+                    })
+
+                ret.append(table_data)
+        return ret
+
+    return str(sample_data_info)
+```
+
+#### 9.3.3 完整调用链
+
+```python
+# di_brain/tools/datamap_table_sample_tool.py (第 159-166 行)
+def get_table_sample_data_generate_sql(
+    table_list: Union[str, List[str]],
+    hadoop_account: str,
+    limit_preview_data: bool = False,
+) -> Union[str, List[Dict]]:
+    """获取样例数据并格式化，用于 SQL 生成"""
+    raw_result = get_table_sample_data(table_list, hadoop_account)
+    processed_result = extract_table_sample_data(raw_result, limit_preview_data)
+    return processed_result
+```
+
+### 9.4 调用时机
+
+在 Text2SQL 流程的 `process_context_and_table_samples` 节点中调用：
+
+```python
+# di_brain/text2sql/text2sql_step.py (第 680-698 行)
+# Step 3: Fetch sample data
+if state.get("use_compass", False):
+    state["sample_data"] = []  # Compass 模型不使用样例数据
+else:
+    try:
+        start_time = time.time()
+        table_sample_data = get_table_sample_data_generate_sql(
+            table_titles, hadoop_account, LIMIT_PROMPT_TOKEN
+        )
+        end_time = time.time()
+        logger.info(
+            f"Text2SQL graph: get table sample data took {end_time - start_time:.2f} seconds"
+        )
+        # 应用 Token 限制
+        table_sample_data = apply_prompt_token_limit(
+            table_sample_data, MAX_SAMPLE_DATA_TOKENS
+        )
+        state["sample_data"] = table_sample_data
+    except Exception as error:
+        logger.error(f"Error fetching sample data by API: {error}")
+```
+
+### 9.5 输出示例
+
+```python
+[
+    {
+        "table_name": "dwd.order_fact",
+        "columns": [
+            {
+                "column_name": "order_id",
+                "column_type": "BIGINT",
+                "preview_data": [1001, 1002, 1003]
+            },
+            {
+                "column_name": "grass_date",
+                "column_type": "STRING",
+                "preview_data": ["2024-01-01", "2024-01-02", "2024-01-03"]
+            },
+            {
+                "column_name": "status",
+                "column_type": "STRING",
+                "preview_data": ["completed", "pending", "cancelled"]
+            },
+            {
+                "column_name": "gmv",
+                "column_type": "DOUBLE",
+                "preview_data": [99.99, 199.50, 50.00]
+            }
+        ]
+    },
+    {
+        "table_name": "dim.user_dim",
+        "columns": [
+            {
+                "column_name": "user_id",
+                "column_type": "BIGINT",
+                "preview_data": [12345, 12346, 12347]
+            },
+            {
+                "column_name": "user_name",
+                "column_type": "STRING",
+                "preview_data": ["Alice", "Bob", "Charlie"]
+            }
+        ]
+    }
+]
+```
+
+### 9.6 在 Prompt 中的作用
+
+样例数据帮助 LLM 理解：
+
+| 信息类型 | 作用 | 示例 |
+|---------|------|------|
+| **日期格式** | 正确写日期条件 | `grass_date = '2024-01-01'` 而非 `'20240101'` |
+| **枚举值** | 正确写枚举过滤 | `status = 'completed'` 而非 `status = 'done'` |
+| **数据类型** | 避免类型转换错误 | 知道 `order_id` 是 BIGINT，不会写 `order_id = '1001'` |
+| **取值范围** | 合理设置条件 | 知道 GMV 范围后，不会写 `gmv > 1000000` |
+
+---
+
+## 10. 样例 SQL 与样例数据的流程图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   样例 SQL 与样例数据检索流程                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                    ┌─────────────────────────┐
+                    │   find_data_docs        │
+                    │   (相关表列表)           │
+                    └───────────┬─────────────┘
+                                │
+                                ▼
+             ┌──────────────────────────────────────┐
+             │   process_context_and_table_samples   │
+             │   (上下文处理与样例获取)               │
+             └───────────┬────────────┬─────────────┘
+                         │            │
+           ┌─────────────┘            └─────────────┐
+           ▼                                        ▼
+┌─────────────────────────┐            ┌─────────────────────────┐
+│  get_table_top_sql_by   │            │  get_table_sample_data  │
+│  _name_list             │            │  _generate_sql          │
+│                         │            │                         │
+│  数据源: MySQL          │            │  数据源: KB Service API │
+│  mart_top_sql_tab       │            │  /sample-data/{s}/{t}   │
+└───────────┬─────────────┘            └───────────┬─────────────┘
+            │                                      │
+            │  ┌────────────────────┐              │  ┌────────────────────┐
+            │  │ {                  │              │  │ [{                 │
+            │  │   "dwd.order":     │              │  │   "table_name":    │
+            │  │   ["SELECT ...",   │              │  │   "dwd.order",     │
+            │  │    "SELECT ..."]   │              │  │   "columns": [     │
+            │  │ }                  │              │  │     {"column_name":│
+            │  └────────────────────┘              │  │      "grass_date", │
+            │                                      │  │      "preview_data"│
+            │                                      │  │      ["2024-01-01"]│
+            │                                      │  │     }              │
+            │                                      │  │   ]                │
+            │                                      │  │ }]                 │
+            │                                      │  └────────────────────┘
+            │                                      │
+            └──────────────┬───────────────────────┘
+                           │
+                           ▼
+            ┌──────────────────────────────────┐
+            │         state["sample_sql"]       │
+            │         state["sample_data"]      │
+            └───────────────┬──────────────────┘
+                            │
+                            ▼
+            ┌──────────────────────────────────┐
+            │      注入到 LLM Prompt           │
+            │                                  │
+            │  <context>                       │
+            │    {context}                     │
+            │    Sample SQLs: {sample_sql}     │
+            │    Sample Data: {sample_data}    │
+            │  <context/>                      │
+            └───────────────┬──────────────────┘
+                            │
+                            ▼
+            ┌──────────────────────────────────┐
+            │          LLM 生成 SQL            │
+            │   参考样例 SQL 和样例数据         │
+            └──────────────────────────────────┘
+```
+
+---
+
 ## 总结
 
 1. **RAG 检索**：通过 `compose_kb_context` 从 MySQL KB 表、Milvus 向量库、ES 全文索引聚合知识
@@ -957,3 +1741,6 @@ TABLE_COLUMN_ORIGIN_RETRIVE_LIMIT = 22  # 列信息检索 22 条
 4. **迭代检索**：若 LLM 需要更多信息，触发 `search_related_tables` 补充表详情后再次调用
 5. **SQL 生成**：使用 Compass 模型，支持多参数并行尝试，确保生成有效 SQL
 6. **SQL 执行**：由 `StarRocksClient` 执行，需用户显式意图 `execute_sql_and_analyze_result` 才触发
+7. **向量数据库**：Milvus 提供语义检索能力，是 RAG 系统实现"理解用户意图"的关键组件
+8. **样例 SQL 检索**：从 `mart_top_sql_tab` 表获取高频 SQL，帮助 LLM 学习实际查询模式
+9. **样例数据检索**：从 KB Service 获取列预览数据，帮助 LLM 理解数据格式和枚举值
