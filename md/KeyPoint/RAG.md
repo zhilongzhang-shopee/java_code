@@ -1733,6 +1733,516 @@ else:
 
 ---
 
+## 11. RAG 检索的详细机制
+
+### 11.1 检索目标
+
+**RAG 检索的目标不是用户的请求本身，而是通过用户的问题作为"查询"，去检索相关的知识上下文**。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         RAG 检索目标架构                                          │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  用户问题（Query）                                                               │
+│  "查询最近7天各区域的GMV"                                                        │
+│           │                                                                      │
+│           ▼                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                        检索目标（Retrieval Targets）                      │   │
+│  ├─────────────────────────────────────────────────────────────────────────┤   │
+│  │                                                                          │   │
+│  │  1. 相关表格元数据（Table Metadata）                                     │   │
+│  │     - 表名、表描述、字段列表、分区信息                                    │   │
+│  │     - 例：dwd.order_fact, dwd.region_dim                                │   │
+│  │                                                                          │   │
+│  │  2. 业务文档（Business Documents）                                       │   │
+│  │     - Confluence 文档、Google Doc                                       │   │
+│  │     - Mart 描述文档、数据字典                                            │   │
+│  │                                                                          │   │
+│  │  3. 术语表（Glossary）                                                   │   │
+│  │     - GMV = Gross Merchandise Value = 交易总额                          │   │
+│  │     - 同义词映射                                                         │   │
+│  │                                                                          │   │
+│  │  4. 业务规则（Business Rules）                                           │   │
+│  │     - GMV 计算规则：不包含取消订单                                       │   │
+│  │     - 日期过滤规则：使用 grass_date 而非 create_time                     │   │
+│  │                                                                          │   │
+│  │  5. 样例 SQL（Sample SQL）                                               │   │
+│  │     - 历史高频 SQL 查询示例                                              │   │
+│  │                                                                          │   │
+│  │  6. 样例数据（Sample Data）                                              │   │
+│  │     - 各列的预览值，帮助理解数据格式                                      │   │
+│  │                                                                          │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│           │                                                                      │
+│           ▼                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                     组装后的上下文（Context）                             │   │
+│  │  传入 LLM，辅助生成 SQL 或回答问题                                       │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.2 完整检索流程架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          RAG 检索完整流程                                        │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  用户请求："查询最近7天各区域的GMV"                                             │
+│           │                                                                      │
+│           ▼                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │ Step 1: data_discovery_tool / find_data                                  │   │
+│  │         触发数据发现流程                                                  │   │
+│  └───────────────────────────────────────────────────────────────────────┬─┘   │
+│                                                                           │      │
+│  ┌────────────────────────────────────────────────────────────────────────┼─┐   │
+│  │                         多路并行检索                                    │ │   │
+│  │  ┌───────────────────────────────────────────────────────────────────┐ │ │   │
+│  │  │                                                                    │ │ │   │
+│  │  │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐    │ │ │   │
+│  │  │  │  Milvus 向量检索  │  │   ES BM25 检索   │  │   MySQL 直接查   │    │ │ │   │
+│  │  │  │  (语义相似度)     │  │  (关键词匹配)     │  │  (KB 详情)       │    │ │ │   │
+│  │  │  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘    │ │ │   │
+│  │  │           │                     │                    │             │ │ │   │
+│  │  │           │   表级向量库         │   表描述索引        │  knowledge_  │ │ │   │
+│  │  │           │   列级向量库         │   di-rag-hive-     │  base_details│ │ │   │
+│  │  │           │                     │   description      │             │ │ │   │
+│  │  │           │                     │                    │             │ │ │   │
+│  │  └───────────┴─────────────────────┴────────────────────┴─────────────┘ │ │   │
+│  │                                    │                                      │ │   │
+│  └────────────────────────────────────┼──────────────────────────────────────┘ │   │
+│                                       │                                          │   │
+│                                       ▼                                          │   │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │ Step 2: 结果融合与重排序                                                  │   │
+│  │         - 去重、按相关度排序                                              │   │
+│  │         - 返回 Top-K 结果                                                │   │
+│  └───────────────────────────────────────────────────────────────────────┬─┘   │
+│                                                                           │      │
+│                                       ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │ Step 3: compose_kb_context                                               │   │
+│  │         组装知识上下文                                                    │   │
+│  │                                                                          │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │   │
+│  │  │ Table        │  │ Table        │  │ Glossary &   │  │ Mart         │ │   │
+│  │  │ Manifest     │  │ Details      │  │ Rules        │  │ Documents    │ │   │
+│  │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │   │
+│  │         └─────────────────┴─────────────────┴─────────────────┘         │   │
+│  │                                    │                                     │   │
+│  │                                    ▼                                     │   │
+│  │                          full_context_prompt                            │   │
+│  └───────────────────────────────────────────────────────────────────────┬─┘   │
+│                                                                           │      │
+│                                       ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │ Step 4: process_context_and_table_samples                                │   │
+│  │         (Text2SQL 流程) 获取样例 SQL 和样例数据                          │   │
+│  │                                                                          │   │
+│  │         sample_sql  ← mart_top_sql_tab (MySQL)                          │   │
+│  │         sample_data ← KB Service API                                    │   │
+│  └───────────────────────────────────────────────────────────────────────┬─┘   │
+│                                                                           │      │
+│                                       ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │ Step 5: 写入 msg_list，传给 LLM                                          │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 11.3 各检索引擎的具体实现
+
+#### 11.3.1 Milvus 向量检索
+
+**用途**：通过语义相似度找到与用户问题相关的表和列
+
+```python
+# di_brain/hive_query.py (第 135-158 行)
+def get_table_retriever() -> MilvusWithSimilarityRetriever:
+    vs = MilvusWithQuery(
+        connection_args=milvus_config,
+        collection_name="di_rag_hive_table_with_ai_desc_v2",  # 表描述向量库
+        embedding_function=get_embeddings_model(),            # compass-embedding-v3
+        vector_field="table_vector",
+        primary_field="uid",  # idc_region.schema.table_name
+    )
+    return MilvusWithSimilarityRetriever(
+        vectorstore=vs,
+        search_kwargs={
+            "k": 100,                          # 返回 Top 100
+            "param": {
+                "metric_type": "L2",           # 欧氏距离
+                "params": {"nprobe": 1200, "reorder_k": 200},
+            },
+            "score_threshold": 600,            # 距离阈值
+        },
+    )
+```
+
+**检索过程**：
+
+```
+用户问题 "查询GMV"
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│  Embedding 模型（compass-embedding-v3）      │
+│  将文本转换为 384 维向量                      │
+│  "查询GMV" → [0.12, -0.34, 0.56, ...]        │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│  Milvus 向量检索                              │
+│  在 di_rag_hive_table_with_ai_desc_v2 中     │
+│  找到向量距离最近的 Top 100 条记录            │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+返回结果：
+- SG.dwd.order_gmv_fact (距离: 0.15)
+- SG.dwd.order_detail (距离: 0.28)
+- ...
+```
+
+#### 11.3.2 Elasticsearch BM25 检索
+
+**用途**：通过关键词匹配找到包含特定词汇的表描述
+
+```python
+# di_brain/hive_query.py (第 93-105 行)
+def get_es_table_retriever() -> BaseRetriever:
+    bm25_retriever = ElasticsearchAdvanceRetriever.from_es_params(
+        index_name="di-rag-hive-description",
+        body_func=bm25_query,  # BM25 查询构建函数
+        url="http://portal-regdi-es-717-general-test.data-infra.shopee.io:80",
+        username="elastic",
+        password="***",
+        document_mapper=es_hint_to_doc_mapper,
+    )
+    return bm25_retriever
+```
+
+**BM25 查询构建**：
+
+```python
+# di_brain/hive_query.py (第 50-85 行)
+def bm25_query(search_query: str, metadata: Dict) -> Dict:
+    search_body = {
+        "query": {
+            "bool": {
+                "must": {
+                    "match": {
+                        "text": {
+                            "query": search_query,
+                            "fuzziness": "0"  # 精确匹配
+                        }
+                    }
+                }
+            }
+        },
+        "size": 100,  # 返回 Top 100
+    }
+    
+    # 支持按 data_marts / schema 过滤
+    filter_condition = metadata.get("retrieve_filters")
+    if filter_condition:
+        # 添加过滤条件...
+        pass
+    
+    return search_body
+```
+
+#### 11.3.3 MySQL 直接查询
+
+**用途**：根据 knowledge_base_name 直接获取 KB 详情
+
+```python
+# di_brain/ask_data/database/query.py
+def get_kb_details_by_type(
+    kb_name: str, 
+    doc_types: List[str]
+) -> List[KnowledgeBaseDetail]:
+    """
+    从 knowledge_base_details_v1_5_0 表查询指定类型的文档
+    
+    doc_types 可以是:
+    - datamap_table_manifest  # 表清单
+    - datamap_table_detail    # 表详情 (JSON)
+    - datamart_desc_doc       # Mart 文档
+    - confluence              # Confluence 文档
+    """
+    sql = f"""
+        SELECT * FROM {TABLE_NAME}
+        WHERE knowledge_base_name = %s
+          AND document_type IN ({','.join(['%s'] * len(doc_types))})
+    """
+    # 执行查询...
+```
+
+### 11.4 多路检索融合机制
+
+#### 11.4.1 检索触发入口
+
+```python
+# di_brain/router/tool_router.py (第 2390-2460 行)
+def data_discovery_tool(
+    user_query: str,
+    knowledge_base_list: List[str],
+    hadoop_account: str,
+) -> dict:
+    """数据发现工具 - RAG 检索的核心入口"""
+    
+    # 1. 调用 ask_data_global 图
+    result = ask_data_global_graph.invoke({
+        "user_query": user_query,
+        "knowledge_base_list": knowledge_base_list,
+    })
+    
+    # 2. 提取检索结果
+    return {
+        "related_tables": result.get("related_tables", []),      # 相关表列表
+        "related_docs": result.get("related_docs", []),          # 相关文档
+        "related_glossaries": result.get("related_glossaries", []),  # 术语表
+        "related_rules": result.get("related_rules", []),        # 业务规则
+        "result_context": result.get("result_context", ""),      # 检索结果摘要
+    }
+```
+
+#### 11.4.2 ask_data_global 图结构
+
+```python
+# di_brain/ask_data_global/graph.py (第 30-100 行)
+def build_ask_data_global_graph():
+    """构建全局数据发现图"""
+    
+    graph = StateGraph(AskDataGlobalState)
+    
+    # 节点 1: 并行检索各个 Knowledge Base
+    graph.add_node("parallel_search_markets", parallel_search_markets)
+    
+    # 节点 2: 汇总检索结果
+    graph.add_node("summarize", summarize)
+    
+    # 流程: START → parallel_search_markets → summarize → END
+    graph.add_edge(START, "parallel_search_markets")
+    graph.add_edge("parallel_search_markets", "summarize")
+    graph.add_edge("summarize", END)
+    
+    return graph.compile()
+```
+
+#### 11.4.3 parallel_search_markets 实现
+
+```python
+# di_brain/ask_data_global/graph.py (第 105-188 行)
+def parallel_search_markets(
+    state: AskDataGlobalState, 
+    config: RunnableConfig
+) -> dict:
+    """并行检索多个 Knowledge Base"""
+    
+    kb_list = state.get("knowledge_base_list", [])
+    user_query = state.get("user_query")
+    
+    results = []
+    
+    # 并行调用每个 KB 的检索
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_kb = {
+            executor.submit(
+                search_single_market,  # 单个 KB 的检索函数
+                kb_name,
+                user_query,
+            ): kb_name
+            for kb_name in kb_list
+        }
+        
+        for future in as_completed(future_to_kb):
+            result = future.result()
+            results.append(result)
+    
+    return {"market_search_results": results}
+```
+
+#### 11.4.4 单个 KB 的检索流程
+
+```python
+# di_brain/ask_data_global/graph.py (内部函数)
+def search_single_market(kb_name: str, user_query: str) -> dict:
+    """单个 Knowledge Base 的检索"""
+    
+    # 1. 获取表清单（Manifest）
+    manifest = get_merged_manifest([kb_name], user_query)
+    
+    # 2. 语义检索相关表
+    #    内部调用 Milvus + ES 双引擎
+    related_tables = manifest.search_similar_tables(user_query)
+    
+    # 3. 获取表详情
+    table_details = get_table_details_by_full_table_names(
+        [t.full_name for t in related_tables]
+    )
+    
+    # 4. 获取相关文档
+    related_docs = get_related_doc_by_kb([kb_name])
+    
+    # 5. 获取术语和规则（仅 Topic KB）
+    glossaries, rules = get_glossary_and_rule_by_kb(kb_name, user_query)
+    
+    return {
+        "kb_name": kb_name,
+        "related_tables": table_details,
+        "related_docs": related_docs,
+        "related_glossaries": glossaries,
+        "related_rules": rules,
+        "has_result": len(table_details) > 0,
+    }
+```
+
+### 11.5 向量检索的核心实现
+
+#### 11.5.1 MilvusWithSimilarityRetriever
+
+```python
+# di_brain/vectorstores/milvus_retriever.py
+class MilvusWithSimilarityRetriever(BaseRetriever):
+    """带相似度分数的 Milvus 检索器"""
+    
+    vectorstore: Milvus
+    search_kwargs: dict = {}
+    
+    def _get_relevant_documents(
+        self, 
+        query: str, 
+        *, 
+        run_manager: CallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        """执行检索"""
+        
+        # 1. 调用 Milvus 的相似度搜索
+        docs_and_scores = self.vectorstore.similarity_search_with_score(
+            query, 
+            **self.search_kwargs
+        )
+        
+        # 2. 过滤低分结果
+        threshold = self.search_kwargs.get("score_threshold", float("inf"))
+        filtered_docs = [
+            doc for doc, score in docs_and_scores 
+            if score <= threshold
+        ]
+        
+        # 3. 将分数写入 metadata
+        for doc, score in docs_and_scores:
+            doc.metadata["_score"] = score
+        
+        return filtered_docs
+```
+
+#### 11.5.2 Embedding 模型
+
+```python
+# di_brain/llms/embedding.py
+def get_embeddings_model():
+    """获取 Embedding 模型"""
+    return OpenAIEmbeddings(
+        model="compass-embedding-v3",       # Shopee 内部 Embedding 模型
+        openai_api_key=COMPASS_API_KEY,
+        openai_api_base=COMPASS_API_BASE,
+        dimensions=384,                      # 384 维向量
+    )
+```
+
+### 11.6 检索结果的去重与排序
+
+```python
+# di_brain/ask_data_global/graph.py (第 220-240 行)
+def filter_similar_tables(table_details: List[TableDetail]) -> List[TableDetail]:
+    """
+    去重和过滤相似表
+    - 按表名去重
+    - 按相关度分数排序
+    - 返回 Top 10
+    """
+    seen = set()
+    unique_tables = []
+    
+    for table in table_details:
+        table_key = f"{table.schema}.{table.table_name}"
+        if table_key not in seen:
+            seen.add(table_key)
+            unique_tables.append(table)
+    
+    # 按分数排序
+    unique_tables.sort(key=lambda t: t.metadata.get("_score", 0))
+    
+    return unique_tables[:10]  # 返回 Top 10
+```
+
+### 11.7 检索结果示例
+
+```python
+# 输入
+user_query = "查询最近7天各区域的GMV"
+knowledge_base_list = ["topic_order_analysis"]
+
+# 输出
+{
+    "related_tables": [
+        TableDetail(
+            schema="dwd",
+            table_name="order_gmv_fact",
+            idc_region="SG",
+            table_desc="订单 GMV 事实表，按天聚合",
+            columns=[
+                {"name": "grass_date", "type": "STRING", "partition": True},
+                {"name": "region", "type": "STRING"},
+                {"name": "gmv", "type": "DOUBLE"},
+            ],
+            _score=0.15,
+        ),
+        TableDetail(
+            schema="dim",
+            table_name="region_dim",
+            idc_region="SG",
+            table_desc="区域维度表",
+            columns=[
+                {"name": "region_code", "type": "STRING"},
+                {"name": "region_name", "type": "STRING"},
+            ],
+            _score=0.32,
+        ),
+    ],
+    "related_docs": [
+        RelatedDoc(
+            title="Order Mart User Guide",
+            content="GMV 计算规则：不包含取消订单...",
+        ),
+    ],
+    "related_glossaries": [
+        TopicGlossaryDto(
+            glossary_name="GMV",
+            desc="Gross Merchandise Value，交易总额",
+            synonym="交易额,销售额",
+        ),
+    ],
+    "related_rules": [
+        TopicRuleDto(
+            rule_desc="GMV 计算时需排除 status='cancelled' 的订单",
+        ),
+    ],
+}
+```
+
+---
+
 ## 总结
 
 1. **RAG 检索**：通过 `compose_kb_context` 从 MySQL KB 表、Milvus 向量库、ES 全文索引聚合知识
@@ -1744,3 +2254,4 @@ else:
 7. **向量数据库**：Milvus 提供语义检索能力，是 RAG 系统实现"理解用户意图"的关键组件
 8. **样例 SQL 检索**：从 `mart_top_sql_tab` 表获取高频 SQL，帮助 LLM 学习实际查询模式
 9. **样例数据检索**：从 KB Service 获取列预览数据，帮助 LLM 理解数据格式和枚举值
+10. **多路检索融合**：Milvus（语义） + ES（关键词） + MySQL（结构化）三路并行检索，结果融合后传给 LLM
